@@ -32,6 +32,7 @@ bool FloatSupport::SupportsLowPrecisionOperand(const HloInstruction& hlo,
     case HloOpcode::kTuple:
     case HloOpcode::kWhile:
     case HloOpcode::kOptimizationBarrier:
+    case HloOpcode::kAdd:
       return true;
     case HloOpcode::kConvert:
       CHECK_EQ(operand_index, 0);
@@ -52,6 +53,7 @@ bool FloatSupport::SupportsLowPrecisionOutput(const HloInstruction& hlo) const {
     case HloOpcode::kTuple:
     case HloOpcode::kWhile:
     case HloOpcode::kOptimizationBarrier:
+    case HloOpcode::kAdd:
       return true;
     case HloOpcode::kConvert:
       return hlo.shape().element_type() == low_precision_type_;

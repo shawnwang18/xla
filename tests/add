@@ -1,0 +1,7 @@
+HloModule module
+
+ENTRY simple_add {
+  Arg_1.929 = bf16[] parameter(1)
+  Arg_0.928 = bf16[] parameter(0)
+  ROOT add.62 = bf16[] add(Arg_0.928, Arg_1.929), metadata={op_name="jit(<unnamed wrapped function>)/jit(main)/jvp(ScoreMatching.loss)/ScoreMatching/ResConvBlock_0/GroupNorm_0/reduce_sum[axes=(1, 2, 4)]" source_file="/usr/local/lib/python3.8/dist-packages/flax/linen/normalization.py" source_line=86}
+}
