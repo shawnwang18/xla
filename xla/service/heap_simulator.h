@@ -25,6 +25,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 #include <vector>
+#include <iostream>
 
 // TODO(b/210891274): Use btree_map after build issue in Windows is resolved.
 #if defined(__GNUC__) || defined(__clang__)
@@ -142,7 +143,8 @@ class HeapSimulator {
   // schedule), assuming no fragmentation.
   static StatusOr<int64_t> MinimumMemoryForModule(
       const HloSchedule& schedule,
-      const LogicalBuffer::SizeFunction& size_function);
+      const LogicalBuffer::SizeFunction& size_function,
+      const Options& option = Options());
 
   // Returns the minimum memory required to compute the given computation,
   // assuming no fragmentation.
@@ -198,6 +200,14 @@ class HeapSimulator {
       const HloAliasAnalysis& alias_analysis,
       const BufferValue::SizeFunction& size_fn, const HloSchedule* schedule,
       const Options& options = Options());
+
+  const HloSchedule* GetSchedule() const {
+    return schedule_;
+  }
+
+  const BufferValue::SizeFunction& GetSizeFunction() const {
+    return size_fn_;
+  }
 
  private:
   // If 'schedule' is non-null, it is used to find kCall and kWhile
@@ -306,6 +316,17 @@ class HeapAlgorithm {
   // Finish collects the buffer offset assignment results.  Finish may only be
   // called once, after all Alloc and Free calls.
   virtual Result Finish() = 0;
+
+  const HeapSimulator* Simulator() const {
+    return simulator_;
+  }
+
+  virtual void SetSimulator(const HeapSimulator* simulator) {
+    simulator_ = simulator;
+  }
+
+  protected: 
+    const HeapSimulator* simulator_;
 };
 
 // NoFragmentationStatsHeap computes the heap size assuming no fragmentation;
@@ -697,6 +718,7 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
 
   Result Finish() override;
 
+
   // Return a BufferIntervalCompare function that sort by spatial size. We don't
   // look at co-locates as they should have the same size.
   static BufferIntervalCompare GetSpatialBufferIntervalCompare();
@@ -749,7 +771,8 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
   std::vector<Chunk> FindChunkCandidates(
       const SlicedBufferInterval& sliced_buffer_interval,
       int64_t preferred_offset = -1) const;
-  void CommitChunk(const BufferInterval& buffer_interval, Chunk chunk);
+  void CommitChunk(const BufferInterval& buffer_interval, Chunk chunk, const absl::flat_hash_set<const BufferType*>& buffer_has_assigned = {});
+
 
   // Adds the buffer and the chunk to the result chunk map.
   virtual void AddToChunkMap(const BufferType* buffer, Chunk chunk);
@@ -810,6 +833,11 @@ class ConstrainedGlobalDecreasingSizeBestFitHeap
         size_limit_per_heap_(size_limit_per_heap) {}
   ~ConstrainedGlobalDecreasingSizeBestFitHeap() override {}
 
+  void CommitChunk(const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval& buffer_interval, Chunk chunk, const absl::flat_hash_set<const HloValue*>& buffer_has_assigned = {});
+
+  int64_t ComputeMinMemoryFromValueSet(const absl::flat_hash_set<const HloValue*>& 
+    buffer_has_assigned) const; 
+
   Result Finish() override;
 
  private:
@@ -849,6 +877,13 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
   }
 
   Result Finish() override;
+
+  void SetSimulator(const HeapSimulator* simulator) override {
+    HeapAlgorithm<BufferType>::SetSimulator(simulator);
+    for (auto& algorithm : algorithms_) {
+        algorithm->SetSimulator(simulator);
+    }
+  }
 
  private:
   std::vector<std::unique_ptr<HeapAlgorithm<BufferType>>> algorithms_;

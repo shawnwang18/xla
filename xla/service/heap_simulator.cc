@@ -79,7 +79,8 @@ std::ostream& operator<<(std::ostream& stream,
 /*static*/
 StatusOr<int64_t> HeapSimulator::MinimumMemoryForModule(
     const HloSchedule& schedule,
-    const LogicalBuffer::SizeFunction& size_function) {
+    const LogicalBuffer::SizeFunction& size_function,
+    const Options& option) {
   if (schedule.empty()) {
     return 0;
   }
@@ -96,7 +97,7 @@ StatusOr<int64_t> HeapSimulator::MinimumMemoryForModule(
   TF_ASSIGN_OR_RETURN(
       HeapSimulator::Result<HloValue> result,
       HeapSimulator::Run(std::make_unique<NoFragmentationStatsHeap<HloValue>>(),
-                         *module, schedule, *alias_analysis, size_function));
+                         *module, schedule, *alias_analysis, size_function, option));
   return result.heap_size;
 }
 
@@ -191,7 +192,7 @@ Status HeapSimulator::RunComputation(
     const HloComputation& computation,
     const HloInstructionSequence& instruction_sequence,
     const HloAliasAnalysis& alias_analysis, HloLiveRange* hlo_live_range) {
-  XLA_VLOG_LINES(1, computation.parent()->ToString());
+  XLA_VLOG_LINES(2, computation.parent()->ToString());
   XLA_VLOG_LINES(2, computation.ToString());
 
   VLOG(1) << hlo_live_range->ToString();
@@ -380,6 +381,7 @@ HeapSimulator::HeapSimulator(
       schedule_(schedule),
       memory_by_computation_(memory_by_computation) {
   debug_trace_.set_whole_module_simulation(schedule_ != nullptr);
+  algorithm_->SetSimulator(this);
 }
 
 HeapSimulator::~HeapSimulator() {}
@@ -1551,27 +1553,7 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::SlicedAllocationFinder::
   return chunks;
 }
 
-template <typename BufferType>
-HeapSimulator::Result<BufferType>
-GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
-  std::vector<BufferInterval> sorted_buffer_intervals =
-      GetSortedBufferIntervals();
 
-  for (auto& buffer_interval : sorted_buffer_intervals) {
-    if (!buffer_interval.need_allocation) {
-      continue;
-    }
-
-    // This implementation of the heap algorithm does not have a notion of
-    // maximum heap size, so it just commits.
-    CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
-  }
-  VLOG(1) << "result heap_size: " << result_.heap_size;
-  Result result;
-  result.heap_size = result_.heap_size;
-  result.heap_results.emplace_back(result_);
-  return result;
-}
 
 template <typename BufferType>
 std::vector<
@@ -1716,32 +1698,6 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::FindChunkCandidates(
   return chunks;
 }
 
-template <typename BufferType>
-void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
-    const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
-        buffer_interval,
-    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk) {
-  // Update the maximum heap size according to the one determined by the chunk
-  // candidate. In case of colocations of different sizes, the chunk size
-  // returned is the maximum of all colocations, so use this value to update the
-  // heap size.
-  result_.heap_size = result_.UpdatedHeapSize(chunk);
-  // Now, update the chunk size to the actual size of the buffer interval.
-  chunk.size = buffer_interval.size;
-  interval_tree_.Add(buffer_interval.start, buffer_interval.end, chunk);
-  for (auto colocation : GetTransitiveColocations(buffer_interval)) {
-    auto colocation_interval = buffer_intervals_[colocation];
-    // Create a colocation chunk with the same offset but with the correct size
-    // of the colocated interval in case the colocations are of different sizes.
-    Chunk colocation_chunk =
-        Chunk::FromOffsetSize(chunk.offset, colocation_interval.size);
-    AddToChunkMap(colocation, colocation_chunk);
-    interval_tree_.Add(colocation_interval.start, colocation_interval.end,
-                       colocation_chunk);
-  }
-
-  AddToChunkMap(buffer_interval.buffer, chunk);
-}
 
 template <typename BufferType>
 void GlobalDecreasingSizeBestFitHeap<BufferType>::AddToChunkMap(
@@ -1756,10 +1712,10 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
   // Convert into std::list so that erase() is O(1).
   std::list<BufferInterval> sorted_buffer_intervals(sorted_buffer_vec.begin(),
                                                     sorted_buffer_vec.end());
-
   // Use do-while here, because we need to create 1 heap in `multi_heap_result`
   // even if `sorted_buffer_intervals` is empty.
   Result multi_heap_result;
+  absl::flat_hash_set<const HloValue*> buffer_has_assigned;
   do {
     // Place buffers into the currently processed heap as many as possible.
     for (auto it = sorted_buffer_intervals.begin();
@@ -1775,6 +1731,7 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
                      << size_limit_per_heap_;
       }
 
+      buffer_has_assigned.insert(buffer_interval.buffer);
       Chunk chunk_candidate = FindChunkCandidate(buffer_interval);
       if (chunk_candidate.chunk_end() <= size_limit_per_heap_ ||
           // Commit the chunk as long as the heap is empty. We do this because
@@ -1782,7 +1739,7 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
           // successfully generated even if there are some buffer sizes larger
           // than the given constraint size.
           result_.heap_size == 0) {
-        CommitChunk(buffer_interval, chunk_candidate);
+        CommitChunk(buffer_interval, chunk_candidate, buffer_has_assigned);
         it = sorted_buffer_intervals.erase(it);
         continue;
       }
@@ -1819,6 +1776,142 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
 
   DCHECK_GE(min_size_index, 0);
   return results[min_size_index];
+}
+
+template <typename BufferType>
+void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
+    const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
+        buffer_interval,
+    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk, 
+    const absl::flat_hash_set<const BufferType*>& buffer_has_assigned) {
+  // Update the maximum heap size according to the one determined by the chunk
+  // candidate. In case of colocations of different sizes, the chunk size
+  // returned is the maximum of all colocations, so use this value to update the
+  // heap size.
+  result_.heap_size = result_.UpdatedHeapSize(chunk);
+  // Now, update the chunk size to the actual size of the buffer interval.
+  chunk.size = buffer_interval.size;
+  interval_tree_.Add(buffer_interval.start, buffer_interval.end, chunk);
+  for (auto colocation : GetTransitiveColocations(buffer_interval)) {
+    auto colocation_interval = buffer_intervals_[colocation];
+    // Create a colocation chunk with the same offset but with the correct size
+    // of the colocated interval in case the colocations are of different sizes.
+    Chunk colocation_chunk =
+        Chunk::FromOffsetSize(chunk.offset, colocation_interval.size);
+    AddToChunkMap(colocation, colocation_chunk);
+    interval_tree_.Add(colocation_interval.start, colocation_interval.end,
+                       colocation_chunk);
+  }
+
+  AddToChunkMap(buffer_interval.buffer, chunk);
+}
+
+template <typename BufferType>
+HeapSimulator::Result<BufferType>
+GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
+ std::vector<BufferInterval> sorted_buffer_intervals =
+     GetSortedBufferIntervals();
+
+ absl::flat_hash_set<const BufferType*> buffer_has_assigned;
+
+ for (auto& buffer_interval : sorted_buffer_intervals) {
+   if (!buffer_interval.need_allocation) {
+     continue;
+   }
+
+   buffer_has_assigned.insert(buffer_interval.buffer);
+
+   // This implementation of the heap algorithm does not have a notion of
+   // maximum heap size, so it just commits.
+   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval), buffer_has_assigned);
+ }
+
+ VLOG(1) << "result heap_size: " << result_.heap_size;
+ Result result;
+ result.heap_size = result_.heap_size;
+ result.heap_results.emplace_back(result_);
+ return result;
+}
+
+int64_t ConstrainedGlobalDecreasingSizeBestFitHeap::ComputeMinMemoryFromValueSet(
+    const absl::flat_hash_set<const HloValue*>& buffer_has_assigned) const {
+  enum MemoryEventType {
+    ALLOC = 0, 
+    FREE = 1
+  };
+
+  absl::flat_hash_map<int64_t, 
+    std::pair<MemoryEventType, const BufferInterval*>> memory_events;
+
+  for (const HloValue* value : buffer_has_assigned) {
+    const BufferInterval& interval = buffer_intervals_.at(value);
+    if (interval.need_allocation) {
+        CHECK(!memory_events.contains(interval.start)) 
+            << "Alloc start event conflicts";
+        CHECK(!memory_events.contains(interval.end)) 
+            << "Free end event conflicts";
+        memory_events.emplace(interval.start, 
+            std::pair(MemoryEventType::ALLOC, &interval));
+        memory_events.emplace(interval.end, 
+            std::pair(MemoryEventType::FREE, &interval));
+    }
+  }
+
+  std::vector<int64_t> keys;
+  keys.reserve(memory_events.size());
+  for (const auto& [key, value] : memory_events) {
+    keys.push_back(key);
+  }
+  std::sort(keys.begin(), keys.end());
+
+  int64_t peak_size = 0;
+  int64_t current_size = 0;
+  for (const auto& key : keys) {
+    auto entry = memory_events[key];
+    if (entry.first == MemoryEventType::ALLOC) {
+        current_size += entry.second->size;
+        if (current_size > peak_size) {
+            peak_size = current_size;
+        }
+    }
+    if (entry.first == MemoryEventType::FREE) {
+        current_size -= entry.second->size;
+    }
+  }
+  return peak_size;
+}
+
+void ConstrainedGlobalDecreasingSizeBestFitHeap::CommitChunk(
+    const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval&
+        buffer_interval,
+    GlobalDecreasingSizeBestFitHeap<HloValue>::Chunk chunk, 
+    const absl::flat_hash_set<const HloValue*>& buffer_has_assigned) {
+   
+  // Update the maximum heap size according to the one determined by the chunk
+  // candidate. In case of colocations of different sizes, the chunk size
+  // returned is the maximum of all colocations, so use this value to update the
+  // heap size.
+  result_.heap_size = result_.UpdatedHeapSize(chunk);
+  // Now, update the chunk size to the actual size of the buffer interval.
+  chunk.size = buffer_interval.size;
+  interval_tree_.Add(buffer_interval.start, buffer_interval.end, chunk);
+  for (auto colocation : GetTransitiveColocations(buffer_interval)) {
+    auto colocation_interval = buffer_intervals_[colocation];
+    // Create a colocation chunk with the same offset but with the correct size
+    // of the colocated interval in case the colocations are of different sizes.
+    Chunk colocation_chunk =
+        Chunk::FromOffsetSize(chunk.offset, colocation_interval.size);
+    AddToChunkMap(colocation, colocation_chunk);
+    interval_tree_.Add(colocation_interval.start, colocation_interval.end,
+                       colocation_chunk);
+  }
+
+  AddToChunkMap(buffer_interval.buffer, chunk);
+
+  if (VLOG_IS_ON(1)) {
+    auto theory_peak = ComputeMinMemoryFromValueSet(buffer_has_assigned); 
+    VLOG(1) << "Current allocation heap size is " << result_.heap_size << " vs SOL peak size " << theory_peak;
+  }
 }
 
 template class GlobalDecreasingSizeBestFitHeap<HloValue>;
