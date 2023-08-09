@@ -262,6 +262,20 @@ Status HeapSimulator::RunComputation(
   for (int64_t i = 0; i < hlo_live_range->schedule_end_time() + 1; ++i) {
     VLOG(1) << "Time step: " << i;
 
+    for (const HloValue* value : buffers_freed[i]) {
+      // For HloValue that does not have user operator, it should have the same 
+      // start/end value for live range. We should call allocate first then free
+      // on the same time step, so to make sure it has an allocation. 
+      // 
+      // For aliased buffers, due to liverange normalization, the end step time
+      // of previous value is equal to the start time of next aliased value, we should
+      // call free operation first then alloc operation for the aliased value.  
+      if (std::find(buffers_defined[i].begin(), buffers_defined[i].end(), value) == 
+          buffers_defined[i].end()) {
+        Free(value, value->instruction());
+      }    
+    }
+
     for (const HloValue* value : buffers_defined[i]) {
       bool shared = false;
       VLOG(1) << "Start buffer: " << value->ToShortString();
@@ -325,13 +339,6 @@ Status HeapSimulator::RunComputation(
                 dataflow_analysis.CanShareOperandBufferWithUser(
                     operand_value->instruction(), operand_value->index(),
                     value->instruction(), value->index())) {
-              // Remove the operand buffer right before sharing (allocating) a
-              // new one.
-              Free(operand_value, operand_value->instruction());
-              buffers_freed[i].erase(
-                  std::remove(buffers_freed[i].begin(), buffers_freed[i].end(),
-                              operand_value),
-                  buffers_freed[i].end());
               ShareBuffer(value, operand_value, value->instruction());
               // The live range of the operand buffer is now extended to the end
               // of the current instruction.
@@ -354,13 +361,13 @@ Status HeapSimulator::RunComputation(
       }
     }
 
-    if (!buffers_freed[i].empty()) {
-      VLOG(1) << "Free Buffer: ";
-    }
     for (const HloValue* value : buffers_freed[i]) {
-      VLOG(1) << "  " << value->ToShortString();
-
-      Free(value, value->instruction());
+      if (std::find(buffers_defined[i].begin(), buffers_defined[i].end(), value) != 
+          buffers_defined[i].end()) {
+        // This is the case when value's live range start and end step time equals, 
+        // call free operator after alloc operator.
+        Free(value, value->instruction());
+      }    
     }
   }
   return OkStatus();
