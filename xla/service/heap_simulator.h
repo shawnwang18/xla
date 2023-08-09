@@ -52,6 +52,7 @@ limitations under the License.
 
 namespace xla {
 
+using ::tsl::strings::HumanReadableNumBytes;
 // Forward declare classes defined below.
 template <typename BufferType>
 class HeapAlgorithm;
@@ -107,6 +108,12 @@ class HeapSimulator {
   // Result represents the result of the heap simulation.
   template <typename BufferType>
   struct Result {
+    std::string ToString() const{
+      return absl::StrCat("HeapSimulator result, total_heap_size: ", 
+                          HumanReadableNumBytes(heap_size), 
+                          " Fragmentation size: ",
+                          HumanReadableNumBytes(fragmentation_size));
+    };
     // Heap results.
     std::vector<HeapResult<BufferType>> heap_results;
 
@@ -771,7 +778,7 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
   std::vector<Chunk> FindChunkCandidates(
       const SlicedBufferInterval& sliced_buffer_interval,
       int64_t preferred_offset = -1) const;
-  void CommitChunk(const BufferInterval& buffer_interval, Chunk chunk, const absl::flat_hash_set<const BufferType*>& buffer_has_assigned = {});
+  void CommitChunk(const BufferInterval& buffer_interval, Chunk chunk);
 
 
   // Adds the buffer and the chunk to the result chunk map.
@@ -833,7 +840,7 @@ class ConstrainedGlobalDecreasingSizeBestFitHeap
         size_limit_per_heap_(size_limit_per_heap) {}
   ~ConstrainedGlobalDecreasingSizeBestFitHeap() override {}
 
-  void CommitChunk(const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval& buffer_interval, Chunk chunk, const absl::flat_hash_set<const HloValue*>& buffer_has_assigned = {});
+  void CommitChunk(const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval& buffer_interval, Chunk chunk);
 
   int64_t ComputeMinMemoryFromValueSet(const absl::flat_hash_set<const HloValue*>& 
     buffer_has_assigned) const; 
@@ -858,6 +865,7 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
   ~ChooseBestHeapAlgorithm() override {}
 
   void Alloc(const BufferType* buffer, int64_t size) override {
+    VLOG(2) << "choose algorithm alloc";
     for (auto& algorithm : algorithms_) {
       algorithm->Alloc(buffer, size);
     }

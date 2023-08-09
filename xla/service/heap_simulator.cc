@@ -44,11 +44,13 @@ limitations under the License.
 #include "xla/service/memory_space_assignment_repacking.h"
 #include "xla/status.h"
 #include "xla/util.h"
+#include "google/protobuf/text_format.h"
 
 namespace xla {
 
 using absl::flat_hash_map;
 using absl::flat_hash_set;
+using ::tsl::strings::HumanReadableNumBytes;
 
 HeapSimulator::Chunk HeapSimulator::Chunk::FromOffsetEnd(int64_t offset,
                                                          int64_t end) {
@@ -263,6 +265,20 @@ Status HeapSimulator::RunComputation(
   for (int64_t i = 0; i < hlo_live_range->schedule_end_time() + 1; ++i) {
     VLOG(1) << "Time step: " << i;
 
+    for (const HloValue* value : buffers_freed[i]) {
+      // For HloValue that does not have user operator, it should have the same 
+      // start/end value for live range. We should call allocate first then free
+      // on the same time step, so to make sure it has an allocation. 
+      // 
+      // For aliased buffers, due to liverange normalization, the end step time
+      // of previous value is equal to the start time of next aliased value, we should
+      // call free operation first then alloc operation for the aliased value.  
+      if (std::find(buffers_defined[i].begin(), buffers_defined[i].end(), value) == 
+          buffers_defined[i].end()) {
+        Free(value, value->instruction());
+      }    
+    }
+
     for (const HloValue* value : buffers_defined[i]) {
       bool shared = false;
       VLOG(1) << "Start buffer: " << value->ToShortString();
@@ -326,13 +342,6 @@ Status HeapSimulator::RunComputation(
                 dataflow_analysis.CanShareOperandBufferWithUser(
                     operand_value->instruction(), operand_value->index(),
                     value->instruction(), value->index())) {
-              // Remove the operand buffer right before sharing (allocating) a
-              // new one.
-              Free(operand_value, operand_value->instruction());
-              buffers_freed[i].erase(
-                  std::remove(buffers_freed[i].begin(), buffers_freed[i].end(),
-                              operand_value),
-                  buffers_freed[i].end());
               ShareBuffer(value, operand_value, value->instruction());
               // The live range of the operand buffer is now extended to the end
               // of the current instruction.
@@ -355,13 +364,13 @@ Status HeapSimulator::RunComputation(
       }
     }
 
-    if (!buffers_freed[i].empty()) {
-      VLOG(1) << "Free Buffer: ";
-    }
     for (const HloValue* value : buffers_freed[i]) {
-      VLOG(1) << "  " << value->ToShortString();
-
-      Free(value, value->instruction());
+      if (std::find(buffers_defined[i].begin(), buffers_defined[i].end(), value) != 
+          buffers_defined[i].end()) {
+        // This is the case when value's live range start and end step time equals, 
+        // call free operator after alloc operator.
+        Free(value, value->instruction());
+      }    
     }
   }
   return OkStatus();
@@ -1715,7 +1724,6 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
   // Use do-while here, because we need to create 1 heap in `multi_heap_result`
   // even if `sorted_buffer_intervals` is empty.
   Result multi_heap_result;
-  absl::flat_hash_set<const HloValue*> buffer_has_assigned;
   do {
     // Place buffers into the currently processed heap as many as possible.
     for (auto it = sorted_buffer_intervals.begin();
@@ -1731,7 +1739,6 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
                      << size_limit_per_heap_;
       }
 
-      buffer_has_assigned.insert(buffer_interval.buffer);
       Chunk chunk_candidate = FindChunkCandidate(buffer_interval);
       if (chunk_candidate.chunk_end() <= size_limit_per_heap_ ||
           // Commit the chunk as long as the heap is empty. We do this because
@@ -1739,7 +1746,7 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
           // successfully generated even if there are some buffer sizes larger
           // than the given constraint size.
           result_.heap_size == 0) {
-        CommitChunk(buffer_interval, chunk_candidate, buffer_has_assigned);
+        CommitChunk(buffer_interval, chunk_candidate);
         it = sorted_buffer_intervals.erase(it);
         continue;
       }
@@ -1782,8 +1789,7 @@ template <typename BufferType>
 void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
     const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
         buffer_interval,
-    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk, 
-    const absl::flat_hash_set<const BufferType*>& buffer_has_assigned) {
+    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk) {
   // Update the maximum heap size according to the one determined by the chunk
   // candidate. In case of colocations of different sizes, the chunk size
   // returned is the maximum of all colocations, so use this value to update the
@@ -1812,18 +1818,14 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
  std::vector<BufferInterval> sorted_buffer_intervals =
      GetSortedBufferIntervals();
 
- absl::flat_hash_set<const BufferType*> buffer_has_assigned;
-
  for (auto& buffer_interval : sorted_buffer_intervals) {
    if (!buffer_interval.need_allocation) {
      continue;
    }
 
-   buffer_has_assigned.insert(buffer_interval.buffer);
-
    // This implementation of the heap algorithm does not have a notion of
    // maximum heap size, so it just commits.
-   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval), buffer_has_assigned);
+   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
  }
 
  VLOG(1) << "result heap_size: " << result_.heap_size;
@@ -1833,59 +1835,10 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
  return result;
 }
 
-int64_t ConstrainedGlobalDecreasingSizeBestFitHeap::ComputeMinMemoryFromValueSet(
-    const absl::flat_hash_set<const HloValue*>& buffer_has_assigned) const {
-  enum MemoryEventType {
-    ALLOC = 0, 
-    FREE = 1
-  };
-
-  absl::flat_hash_map<int64_t, 
-    std::pair<MemoryEventType, const BufferInterval*>> memory_events;
-
-  for (const HloValue* value : buffer_has_assigned) {
-    const BufferInterval& interval = buffer_intervals_.at(value);
-    if (interval.need_allocation) {
-        CHECK(!memory_events.contains(interval.start)) 
-            << "Alloc start event conflicts";
-        CHECK(!memory_events.contains(interval.end)) 
-            << "Free end event conflicts";
-        memory_events.emplace(interval.start, 
-            std::pair(MemoryEventType::ALLOC, &interval));
-        memory_events.emplace(interval.end, 
-            std::pair(MemoryEventType::FREE, &interval));
-    }
-  }
-
-  std::vector<int64_t> keys;
-  keys.reserve(memory_events.size());
-  for (const auto& [key, value] : memory_events) {
-    keys.push_back(key);
-  }
-  std::sort(keys.begin(), keys.end());
-
-  int64_t peak_size = 0;
-  int64_t current_size = 0;
-  for (const auto& key : keys) {
-    auto entry = memory_events[key];
-    if (entry.first == MemoryEventType::ALLOC) {
-        current_size += entry.second->size;
-        if (current_size > peak_size) {
-            peak_size = current_size;
-        }
-    }
-    if (entry.first == MemoryEventType::FREE) {
-        current_size -= entry.second->size;
-    }
-  }
-  return peak_size;
-}
-
 void ConstrainedGlobalDecreasingSizeBestFitHeap::CommitChunk(
     const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval&
         buffer_interval,
-    GlobalDecreasingSizeBestFitHeap<HloValue>::Chunk chunk, 
-    const absl::flat_hash_set<const HloValue*>& buffer_has_assigned) {
+    GlobalDecreasingSizeBestFitHeap<HloValue>::Chunk chunk) {
    
   // Update the maximum heap size according to the one determined by the chunk
   // candidate. In case of colocations of different sizes, the chunk size
@@ -1907,11 +1860,6 @@ void ConstrainedGlobalDecreasingSizeBestFitHeap::CommitChunk(
   }
 
   AddToChunkMap(buffer_interval.buffer, chunk);
-
-  if (VLOG_IS_ON(1)) {
-    auto theory_peak = ComputeMinMemoryFromValueSet(buffer_has_assigned); 
-    VLOG(1) << "Current allocation heap size is " << result_.heap_size << " vs SOL peak size " << theory_peak;
-  }
 }
 
 template class GlobalDecreasingSizeBestFitHeap<HloValue>;
