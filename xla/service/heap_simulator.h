@@ -208,14 +208,6 @@ class HeapSimulator {
       const BufferValue::SizeFunction& size_fn, const HloSchedule* schedule,
       const Options& options = Options());
 
-  const HloSchedule* GetSchedule() const {
-    return schedule_;
-  }
-
-  const BufferValue::SizeFunction& GetSizeFunction() const {
-    return size_fn_;
-  }
-
  private:
   // If 'schedule' is non-null, it is used to find kCall and kWhile
   // sub-computations, and the heap simulation for those sub-computations will
@@ -326,10 +318,6 @@ class HeapAlgorithm {
 
   const HeapSimulator* Simulator() const {
     return simulator_;
-  }
-
-  virtual void SetSimulator(const HeapSimulator* simulator) {
-    simulator_ = simulator;
   }
 
   protected: 
@@ -885,13 +873,6 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
   }
 
   Result Finish() override;
-
-  void SetSimulator(const HeapSimulator* simulator) override {
-    HeapAlgorithm<BufferType>::SetSimulator(simulator);
-    for (auto& algorithm : algorithms_) {
-        algorithm->SetSimulator(simulator);
-    }
-  }
 
  private:
   std::vector<std::unique_ptr<HeapAlgorithm<BufferType>>> algorithms_;

@@ -44,7 +44,6 @@ limitations under the License.
 #include "xla/service/memory_space_assignment_repacking.h"
 #include "xla/status.h"
 #include "xla/util.h"
-#include "google/protobuf/text_format.h"
 
 namespace xla {
 
@@ -390,7 +389,6 @@ HeapSimulator::HeapSimulator(
       schedule_(schedule),
       memory_by_computation_(memory_by_computation) {
   debug_trace_.set_whole_module_simulation(schedule_ != nullptr);
-  algorithm_->SetSimulator(this);
 }
 
 HeapSimulator::~HeapSimulator() {}
@@ -1786,6 +1784,30 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
 }
 
 template <typename BufferType>
+HeapSimulator::Result<BufferType>
+GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
+ std::vector<BufferInterval> sorted_buffer_intervals =
+     GetSortedBufferIntervals();
+
+ for (auto& buffer_interval : sorted_buffer_intervals) {
+   if (!buffer_interval.need_allocation) {
+     continue;
+   }
+
+   // This implementation of the heap algorithm does not have a notion of
+   // maximum heap size, so it just commits.
+   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
+ }
+
+ VLOG(1) << "result heap_size: " << result_.heap_size;
+ Result result;
+ result.heap_size = result_.heap_size;
+ result.heap_results.emplace_back(result_);
+ return result;
+}
+
+
+template <typename BufferType>
 void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
     const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
         buffer_interval,
@@ -1812,28 +1834,6 @@ void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
   AddToChunkMap(buffer_interval.buffer, chunk);
 }
 
-template <typename BufferType>
-HeapSimulator::Result<BufferType>
-GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
- std::vector<BufferInterval> sorted_buffer_intervals =
-     GetSortedBufferIntervals();
-
- for (auto& buffer_interval : sorted_buffer_intervals) {
-   if (!buffer_interval.need_allocation) {
-     continue;
-   }
-
-   // This implementation of the heap algorithm does not have a notion of
-   // maximum heap size, so it just commits.
-   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
- }
-
- VLOG(1) << "result heap_size: " << result_.heap_size;
- Result result;
- result.heap_size = result_.heap_size;
- result.heap_results.emplace_back(result_);
- return result;
-}
 
 void ConstrainedGlobalDecreasingSizeBestFitHeap::CommitChunk(
     const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval&
