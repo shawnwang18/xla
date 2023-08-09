@@ -25,7 +25,6 @@ limitations under the License.
 #include <string>
 #include <utility>
 #include <vector>
-#include <iostream>
 
 // TODO(b/210891274): Use btree_map after build issue in Windows is resolved.
 #if defined(__GNUC__) || defined(__clang__)
@@ -150,8 +149,7 @@ class HeapSimulator {
   // schedule), assuming no fragmentation.
   static StatusOr<int64_t> MinimumMemoryForModule(
       const HloSchedule& schedule,
-      const LogicalBuffer::SizeFunction& size_function,
-      const Options& option = Options());
+      const LogicalBuffer::SizeFunction& size_function);
 
   // Returns the minimum memory required to compute the given computation,
   // assuming no fragmentation.
@@ -316,12 +314,6 @@ class HeapAlgorithm {
   // called once, after all Alloc and Free calls.
   virtual Result Finish() = 0;
 
-  const HeapSimulator* Simulator() const {
-    return simulator_;
-  }
-
-  protected: 
-    const HeapSimulator* simulator_;
 };
 
 // NoFragmentationStatsHeap computes the heap size assuming no fragmentation;
@@ -768,7 +760,6 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
       int64_t preferred_offset = -1) const;
   void CommitChunk(const BufferInterval& buffer_interval, Chunk chunk);
 
-
   // Adds the buffer and the chunk to the result chunk map.
   virtual void AddToChunkMap(const BufferType* buffer, Chunk chunk);
 
@@ -828,11 +819,6 @@ class ConstrainedGlobalDecreasingSizeBestFitHeap
         size_limit_per_heap_(size_limit_per_heap) {}
   ~ConstrainedGlobalDecreasingSizeBestFitHeap() override {}
 
-  void CommitChunk(const GlobalDecreasingSizeBestFitHeap<HloValue>::BufferInterval& buffer_interval, Chunk chunk);
-
-  int64_t ComputeMinMemoryFromValueSet(const absl::flat_hash_set<const HloValue*>& 
-    buffer_has_assigned) const; 
-
   Result Finish() override;
 
  private:
@@ -853,7 +839,6 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
   ~ChooseBestHeapAlgorithm() override {}
 
   void Alloc(const BufferType* buffer, int64_t size) override {
-    VLOG(2) << "choose algorithm alloc";
     for (auto& algorithm : algorithms_) {
       algorithm->Alloc(buffer, size);
     }
