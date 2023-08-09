@@ -1705,6 +1705,57 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::FindChunkCandidates(
   return chunks;
 }
 
+template <typename BufferType>
+HeapSimulator::Result<BufferType>
+GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
+ std::vector<BufferInterval> sorted_buffer_intervals =
+     GetSortedBufferIntervals();
+
+ for (auto& buffer_interval : sorted_buffer_intervals) {
+   if (!buffer_interval.need_allocation) {
+     continue;
+   }
+
+   // This implementation of the heap algorithm does not have a notion of
+   // maximum heap size, so it just commits.
+   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
+ }
+
+ VLOG(1) << "result heap_size: " << result_.heap_size;
+ Result result;
+ result.heap_size = result_.heap_size;
+ result.heap_results.emplace_back(result_);
+ return result;
+}
+
+template <typename BufferType>
+void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
+    const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
+        buffer_interval,
+    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk) {
+  // Update the maximum heap size according to the one determined by the chunk
+  // candidate. In case of colocations of different sizes, the chunk size
+  // returned is the maximum of all colocations, so use this value to update the
+  // heap size.
+  result_.heap_size = result_.UpdatedHeapSize(chunk);
+  // Now, update the chunk size to the actual size of the buffer interval.
+  chunk.size = buffer_interval.size;
+  interval_tree_.Add(buffer_interval.start, buffer_interval.end, chunk);
+  for (auto colocation : GetTransitiveColocations(buffer_interval)) {
+    auto colocation_interval = buffer_intervals_[colocation];
+    // Create a colocation chunk with the same offset but with the correct size
+    // of the colocated interval in case the colocations are of different sizes.
+    Chunk colocation_chunk =
+        Chunk::FromOffsetSize(chunk.offset, colocation_interval.size);
+    AddToChunkMap(colocation, colocation_chunk);
+    interval_tree_.Add(colocation_interval.start, colocation_interval.end,
+                       colocation_chunk);
+  }
+
+  AddToChunkMap(buffer_interval.buffer, chunk);
+}
+
+
 
 template <typename BufferType>
 void GlobalDecreasingSizeBestFitHeap<BufferType>::AddToChunkMap(
@@ -1781,57 +1832,6 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
 
   DCHECK_GE(min_size_index, 0);
   return results[min_size_index];
-}
-
-template <typename BufferType>
-HeapSimulator::Result<BufferType>
-GlobalDecreasingSizeBestFitHeap<BufferType>::Finish() {
- std::vector<BufferInterval> sorted_buffer_intervals =
-     GetSortedBufferIntervals();
-
- for (auto& buffer_interval : sorted_buffer_intervals) {
-   if (!buffer_interval.need_allocation) {
-     continue;
-   }
-
-   // This implementation of the heap algorithm does not have a notion of
-   // maximum heap size, so it just commits.
-   CommitChunk(buffer_interval, FindChunkCandidate(buffer_interval));
- }
-
- VLOG(1) << "result heap_size: " << result_.heap_size;
- Result result;
- result.heap_size = result_.heap_size;
- result.heap_results.emplace_back(result_);
- return result;
-}
-
-
-template <typename BufferType>
-void GlobalDecreasingSizeBestFitHeap<BufferType>::CommitChunk(
-    const GlobalDecreasingSizeBestFitHeap<BufferType>::BufferInterval&
-        buffer_interval,
-    GlobalDecreasingSizeBestFitHeap<BufferType>::Chunk chunk) {
-  // Update the maximum heap size according to the one determined by the chunk
-  // candidate. In case of colocations of different sizes, the chunk size
-  // returned is the maximum of all colocations, so use this value to update the
-  // heap size.
-  result_.heap_size = result_.UpdatedHeapSize(chunk);
-  // Now, update the chunk size to the actual size of the buffer interval.
-  chunk.size = buffer_interval.size;
-  interval_tree_.Add(buffer_interval.start, buffer_interval.end, chunk);
-  for (auto colocation : GetTransitiveColocations(buffer_interval)) {
-    auto colocation_interval = buffer_intervals_[colocation];
-    // Create a colocation chunk with the same offset but with the correct size
-    // of the colocated interval in case the colocations are of different sizes.
-    Chunk colocation_chunk =
-        Chunk::FromOffsetSize(chunk.offset, colocation_interval.size);
-    AddToChunkMap(colocation, colocation_chunk);
-    interval_tree_.Add(colocation_interval.start, colocation_interval.end,
-                       colocation_chunk);
-  }
-
-  AddToChunkMap(buffer_interval.buffer, chunk);
 }
 
 
