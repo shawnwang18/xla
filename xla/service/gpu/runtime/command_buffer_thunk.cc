@@ -191,21 +191,6 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
   // are no-op (e.g. memcpy of size 0) and we have no emitted thunks for them.
   if (commands_.empty()) return absl::OkStatus();
 
-  // TODO(b/290773547): Profiler (CUPTI) + CUDA graphs lead to memory
-  // corruption. As a work around disable command buffers (CUDA graphs) and run
-  // everything in op-by-op mode.
-  if (tsl::profiler::ProfilerLock::HasActiveSession() && thunks_.has_value()) {
-    VLOG(1) << "Execute command buffer thunk as a regular thunk sequence "
-               "because we detected active profiling session";
-    const ModuleAnnotations* annotations = GetCurrentModuleAnnotations();
-    for (auto& thunk : *thunks_) {
-      auto scoped_annotation =
-          GetKernelAnnotation(annotations, thunk->profile_annotation());
-      TF_RETURN_IF_ERROR(thunk->ExecuteOnStream(params));
-    }
-    return absl::OkStatus();
-  }
-
   se::StreamExecutor* executor = params.stream->parent();
   TF_ASSIGN_OR_RETURN(std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
                       GetOrCreateCommandBuffer(executor));
