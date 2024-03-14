@@ -87,6 +87,17 @@ static bool IsNoOp(const HloInstruction* hlo) {
                           HloOpcode::kGetTupleElement>(hlo);
 };
 
+std::set<std::string> confirmed_call_targets = {
+    "te_layernorm_forward_fp8",
+    "te_transpose",
+    "te_quantize",
+    "te_scaled_upper_triang_masked_softmax_forward",
+    "te_dgelu_dbias_cast_transpose",
+    "te_layernorm_backward",
+    "te_cast_transpose",
+    "te_scaled_upper_triang_masked_softmax_backward",
+    "te_gelu_fp8"};
+
 //===----------------------------------------------------------------------===//
 // Synchronous HLO operations mapped to commands.
 //===----------------------------------------------------------------------===//
@@ -133,6 +144,12 @@ static bool IsCommand(const HloCustomCallInstruction* hlo,
       // TODO(b/327718087): This is an ugly hack to prevent capturing triton
       // custom calls that might do autotuning at run time.
       !absl::StrContains(hlo->metadata().op_name(), "Autotuner")) {
+    return true;
+  }
+
+  if (config.enabled_commands.contains(DebugOptions::CUSTOM_CALL) &&
+      (confirmed_call_targets.find(hlo->custom_call_target()) !=
+       confirmed_call_targets.end())) {
     return true;
   }
 
@@ -288,6 +305,11 @@ CommandBufferScheduling::CollectCommandBufferSequences(
       RemoveTrailingNoOps(current_seq);
       sequences.push_back(std::move(current_seq));
     }
+    if (VLOG_IS_ON(3) && (num_commands_in_current_seq > 0)) {
+      VLOG(3) << "Commands are not included in command buffer due to "
+                 "min_commands constraints: \n"
+              << current_seq.ToString();
+    }
     current_seq = HloInstructionSequence();
     num_commands_in_current_seq = 0;
   };
@@ -382,6 +404,12 @@ CommandBufferScheduling::CollectCommandBufferSequences(
         i += seq.instructions().size() - 1;
         continue;
       }
+    }
+
+    if (VLOG_IS_ON(3) && !IsNoOp(inst) && !IsParameter(inst) &&
+        !IsConstant(inst)) {
+      VLOG(3) << "CommandBufferScheduler does not support inst: "
+              << inst->ToString();
     }
 
     // If we didn't find the next command, collect the current sequence and

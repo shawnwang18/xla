@@ -102,6 +102,17 @@ class HloInstructionSequence {
   // Returns the unique IDs of the instructions in the sequence (in order).
   const std::vector<int>& ids() const { return id_sequence_; }
 
+  std::string ToString() {
+    std::stringstream ss;
+    for (size_t i = 0; i < instruction_sequence_.size(); ++i) {
+        ss << instruction_sequence_[i]->ToString();
+        if (i < instruction_sequence_.size() - 1) {
+            ss << "\n";
+        }
+    }
+    return ss.str();
+  }
+
  private:
   // The sequence as HloInstructions.
   std::vector<HloInstruction*> instruction_sequence_;
