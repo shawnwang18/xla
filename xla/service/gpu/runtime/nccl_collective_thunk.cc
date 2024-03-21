@@ -520,7 +520,7 @@ absl::Status NcclCollectiveDoneThunk::ExecuteOnStream(
   absl::Status result = params.stream->WaitFor(event);
   VLOG(1) << absl::StreamFormat("Nccl collective done %s.",
                                 Thunk::KindToString(kind()));
-  reutrn result;
+  return result;
 }
 
 absl::Status IsValidOperand(mlir::Value operand, Thunk::Kind reduction_op) {
