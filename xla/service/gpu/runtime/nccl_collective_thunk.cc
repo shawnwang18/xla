@@ -517,7 +517,10 @@ absl::Status NcclCollectiveDoneThunk::ExecuteOnStream(
     const ExecuteParams& params) {
   se::StreamExecutor* executor = params.stream->parent();
   TF_ASSIGN_OR_RETURN(se::Event * event, async_events_->GetEvent(executor));
-  return params.stream->WaitFor(event);
+  absl::Status result = params.stream->WaitFor(event);
+  VLOG(1) << absl::StreamFormat("Nccl collective done %s.",
+                                Thunk::KindToString(kind()));
+  reutrn result;
 }
 
 absl::Status IsValidOperand(mlir::Value operand, Thunk::Kind reduction_op) {
