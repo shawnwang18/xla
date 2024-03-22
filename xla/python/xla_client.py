@@ -114,8 +114,8 @@ def make_gpu_client(
       distributed_client=distributed_client,
       node_id=node_id,
       num_nodes=num_nodes,
-      platform_name=platform_name,
       allowed_devices=allowed_devices,
+      platform_name=platform_name,
       mock=mock,
   )
 
