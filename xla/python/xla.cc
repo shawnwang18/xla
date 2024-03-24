@@ -45,7 +45,6 @@ limitations under the License.
 #include "nanobind/stl/unique_ptr.h"  // from @nanobind  // IWYU pragma: keep
 #include "nanobind/stl/variant.h"  // from @nanobind  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // from @nanobind  // IWYU pragma: keep
-#include "nanobind/stl/set.h"
 #include "xla/ffi/ffi_api.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/distributed/client.h"
