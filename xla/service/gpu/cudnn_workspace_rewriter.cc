@@ -127,7 +127,7 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
     TF_ASSIGN_OR_RETURN(
         se::gpu::CudnnGraph graph,
         se::gpu::GetCudnnFlashAttentionOperationGraph(
-            dnn_support, fmha_config.lhs_bmm1, fmha_config.rhs_bmm1,
+            dnn_support, nullptr, fmha_config.lhs_bmm1, fmha_config.rhs_bmm1,
             fmha_config.rhs_bmm2, fmha_config.output, fmha_config.bias,
             fmha_config.mask, fmha_config.activation,
             static_cast<float>(*fmha_config.fmha_scale),
@@ -222,7 +222,7 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
     TF_ASSIGN_OR_RETURN(
         se::gpu::CudnnGraph graph,
         se::gpu::GetCudnnFlashAttentionBackwardOperationGraph(
-            dnn_support, fmha_config.bmm1_grad_gemm1_rhs,
+            dnn_support, nullptr, fmha_config.bmm1_grad_gemm1_rhs,
             fmha_config.bmm1_grad_gemm2_rhs, fmha_config.bmm2_grad_gemm1_lhs,
             fmha_config.bmm2_grad_gemm2_rhs, fmha_config.d_output,
             fmha_config.d_bmm1_lhs, fmha_config.d_bmm1_rhs,

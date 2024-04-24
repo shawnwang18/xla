@@ -66,6 +66,13 @@ std::optional<se::DeviceMemoryBase> AssignBufferIfNotNull(
              : std::nullopt;
 }
 
+absl::Status FusedMHAThunk::Initialize(const InitializeParams& params) {
+  if (!params.executor->AsDnn()) {
+    return absl::InternalError("Failed to initialize CUDNN support");
+  }
+  return absl::OkStatus();
+}
+
 absl::Status FusedMHAThunk::ExecuteOnStream(const ExecuteParams& params) {
   const auto& buffer_allocations = *params.buffer_allocations;
   se::DeviceMemoryBase lhs_bmm1_buffer =
@@ -145,6 +152,13 @@ FusedMHABackwardThunk::GetOrCreateRunner(
              .first;
   }
   return *it->second;
+}
+
+absl::Status FusedMHABackwardThunk::Initialize(const InitializeParams& params) {
+  if (!params.executor->AsDnn()) {
+    return absl::InternalError("Failed to initialize CUDNN support");
+  }
+  return absl::OkStatus();
 }
 
 absl::Status FusedMHABackwardThunk::ExecuteOnStream(
