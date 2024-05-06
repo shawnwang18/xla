@@ -335,24 +335,6 @@ class CudnnSupport : public dnn::DnnSupport {
       std::optional<dnn::TensorDescriptor> dscale_descriptor,
       std::optional<dnn::TensorDescriptor> dbias_descriptor) override;
 
-  absl::StatusOr<std::unique_ptr<const dnn::FusedMHABackwardRunner>>
-  FusedMHABackwardRunnerFromDesc(
-      Stream* stream, const dnn::AlgorithmDesc& algorithm_desc,
-      const dnn::MatmulTensorDescriptor& bmm1_grad_gemm1_rhs_descriptor,
-      const dnn::MatmulTensorDescriptor& bmm1_grad_gemm2_rhs_descriptor,
-      const dnn::MatmulTensorDescriptor& bmm2_grad_gemm1_lhs_descriptor,
-      const dnn::MatmulTensorDescriptor& bmm2_grad_gemm2_rhs_descriptor,
-      const dnn::MatmulTensorDescriptor& d_output_descriptor,
-      const dnn::TensorDescriptor& d_bmm1_lhs_descriptor,
-      const dnn::TensorDescriptor& d_bmm1_rhs_descriptor,
-      const dnn::TensorDescriptor& d_bmm2_rhs_descriptor,
-      std::optional<dnn::TensorDescriptor> d_s_descriptor,
-      std::optional<dnn::TensorDescriptor> d_bias_descriptor,
-      std::optional<dnn::TensorDescriptor> fwd_output_descriptor,
-      std::optional<dnn::TensorDescriptor> bias_descriptor, double scale,
-      std::optional<double> dropout_rate, std::optional<int64_t> seed,
-      dnn::FMHAMaskKind mask_type);
-
   bool GetRnnAlgorithms(
       std::vector<dnn::AlgorithmDesc>* out_algorithms) override;
 

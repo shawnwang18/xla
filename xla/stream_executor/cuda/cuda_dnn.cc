@@ -3779,32 +3779,6 @@ absl::StatusOr<cudnn_frontend::Tensor> CreateCudnnTensor(
 }
 
 #if CUDNN_VERSION >= 8800
-enum CudnnfMHAUid {
-  Q_ID = 400,
-  K_ID,
-  V_ID,
-  P_ID,
-  O_ID,
-  dQ_ID,
-  dK_ID,
-  dV_ID,
-  dP_ID,
-  dO_ID,
-  dS_ID,
-  dBIAS_ID,
-  BIAS_ID,
-  MASK_ID,
-  ZERO_VAL_ID,
-  ONE_VAL_ID,
-  NEG_INFINITY_ID,
-  ALPHA_SCALE_ID,
-  DROPOUT_SCALE_ID,
-  Q_SEQLEN_ID,
-  K_SEQLEN_ID,
-  D_OFFSET_ID,
-  D_SEED_ID,
-  VIRTUAL_ID = 34857
-};
 
 absl::StatusOr<cudnn_frontend::PointWiseDesc> CreatePwDesc(
     dnn::DataType dtype, cudnnPointwiseMode_t mode) {
@@ -3860,48 +3834,6 @@ absl::StatusOr<cudnn_frontend::Operation> CreateTernaryPwOp(
   return pw_op_created;
 }
 
-// Returns a cudnn tensor that's the output of the mask op
-absl::StatusOr<cudnn_frontend::Tensor> CreateCudnnMaskFwdTensor(
-    std::vector<cudnn_frontend::Operation>& ops, absl::Span<const int64_t> dims,
-    absl::Span<const int64_t> strides, dnn::DataType dtype,
-    cudnn_frontend::Tensor& input_tensor) {
-  std::vector<int64_t> mask_dim(dims.size(), 1);
-  std::vector<int64_t> mask_stride(strides.size(), 1);
-
-  // Create the mask tensor
-  TF_ASSIGN_OR_RETURN(
-      auto mask_tensor,
-      CreateCudnnTensor(dims, strides, CudnnfMHAUid::MASK_ID, dtype, 1, -1,
-                        /*is_virtual=*/false));
-  // Create the mask output tensor
-  TF_ASSIGN_OR_RETURN(
-      auto mask_out_tensor,
-      CreateCudnnTensor(dims, strides, CudnnfMHAUid::VIRTUAL_ID + 400,
-                        dnn::DataType::kFloat, 1, -1,
-                        /*is_virtual=*/true));
-
-  auto mask_desc = cudnn_frontend::PointWiseDescBuilder()
-                       .setMode(CUDNN_POINTWISE_MUL)
-                       .setComputeType(CUDNN_DATA_FLOAT)
-                       .build();
-
-  // Create the mask op.
-  auto mask_op = cudnn_frontend::OperationBuilder(
-                     CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR)
-                     .setxDesc(input_tensor)
-                     .setbDesc(mask_tensor)
-                     .setyDesc(mask_out_tensor)
-                     .setpwDesc(mask_desc)
-                     .build();
-
-  RETURN_MSG_IF_CUDNN_ERROR(mask_op);
-
-  RETURN_MSG_IF_CUDNN_ERROR(mask_out_tensor);
-  // Add mask to op list
-  ops.push_back(std::move(mask_op));
-
-  return mask_out_tensor;
-}
 #endif  // CUDNN_VERSION >= 8800
 
 absl::StatusOr<std::unique_ptr<cudnn_frontend::OperationGraph>>
@@ -5160,24 +5092,23 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
   }
   // Setting seed and offset
   if (use_dropout) {
-    auto seed_tensor =
-        graph.tensor(Tensor_attributes()
-                         .set_name("seed")
-                         .set_dim({1, 1, 1, 1})
-                         .set_stride({1, 1, 1, 1})
-                         .set_data_type(cudnn_frontend::DataType_t::INT64)
-                         .set_is_pass_by_value(true)
-                         .set_uid(CuDnnTensorUID(uid_offset++)));
-    auto offset_tensor =
-        graph.tensor(Tensor_attributes()
-                         .set_name("offset")
-                         .set_dim({1, 1, 1, 1})
-                         .set_stride({1, 1, 1, 1})
-                         .set_data_type(cudnn_frontend::DataType_t::INT64)
-                         .set_is_pass_by_value(true)
-                         .set_uid(CuDnnTensorUID(uid_offset++)));
-    sdpa_options.set_dropout((float)dropout_rate.value(), seed_tensor,
-                             offset_tensor);
+    LOG(FATAL) << "FIXME";
+    // auto seed_tensor =
+    //     graph.tensor(Tensor_attributes()
+    //                      .set_name("seed")
+    //                      .set_dim({1, 1, 1, 1})
+    //                      .set_stride({1, 1, 1, 1})
+    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
+    //                      .set_is_pass_by_value(true));
+    // auto offset_tensor =
+    //     graph.tensor(Tensor_attributes()
+    //                      .set_name("offset")
+    //                      .set_dim({1, 1, 1, 1})
+    //                      .set_stride({1, 1, 1, 1})
+    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
+    //                      .set_is_pass_by_value(true));
+    // sdpa_options.set_dropout((float)dropout_rate.value(), seed_tensor,
+    //                          offset_tensor);
   }
 
   // Add SDPA to the graph.
@@ -5258,41 +5189,6 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
       .set_intermediate_data_type(cudnn_frontend::DataType_t::FLOAT)
       .set_io_data_type(ioDataType);
 
-  std::shared_ptr<Tensor_attributes> q =
-      graph.tensor(Tensor_attributes()
-                       .set_name("Q")
-                       .set_dim(q_desc.GetCudnnCompatibleDimensions(false))
-                       .set_stride(q_desc.GetCudnnCompatibleStrides(false))
-                       .set_uid(CudnnfMHAUid::Q_ID)
-                       .set_data_type(ioDataType));
-  std::shared_ptr<Tensor_attributes> k =
-      graph.tensor(Tensor_attributes()
-                       .set_name("K")
-                       .set_dim(k_desc.GetCudnnCompatibleDimensions(false))
-                       .set_stride(k_desc.GetCudnnCompatibleStrides(false))
-                       .set_uid(CudnnfMHAUid::K_ID)
-                       .set_data_type(ioDataType));
-  std::shared_ptr<Tensor_attributes> v =
-      graph.tensor(Tensor_attributes()
-                       .set_name("V")
-                       .set_dim(v_desc.GetCudnnCompatibleDimensions(true))
-                       .set_stride(v_desc.GetCudnnCompatibleStrides(true))
-                       .set_uid(CudnnfMHAUid::V_ID)
-                       .set_data_type(ioDataType));
-  std::shared_ptr<Tensor_attributes> o =
-      graph.tensor(Tensor_attributes()
-                       .set_name("O")
-                       .set_dim(do_desc.GetCudnnCompatibleDimensions(false))
-                       .set_stride(do_desc.GetCudnnCompatibleStrides(false))
-                       .set_uid(CudnnfMHAUid::O_ID)
-                       .set_data_type(ioDataType));
-  std::shared_ptr<Tensor_attributes> dO =
-      graph.tensor(Tensor_attributes()
-                       .set_name("dO")
-                       .set_dim(do_desc.GetCudnnCompatibleDimensions(false))
-                       .set_stride(do_desc.GetCudnnCompatibleStrides(false))
-                       .set_uid(CudnnfMHAUid::dO_ID)
-                       .set_data_type(ioDataType));
   auto p_dims = p_desc.GetCudnnCompatibleDimensions(false);
   auto p_strides = p_desc.GetCudnnCompatibleStrides(false);
   std::vector<int64_t> p_reduction_dims(p_dims.begin(), p_dims.end() - 1);
@@ -5306,13 +5202,6 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
     p_reduction_strides.push_back(stride / p_reduced_dim_len);
   }
   p_reduction_strides[3] = 1;
-  std::shared_ptr<Tensor_attributes> stats =
-      graph.tensor(Tensor_attributes()
-                       .set_name("stats")
-                       .set_dim(p_reduction_dims)
-                       .set_stride(p_reduction_strides)
-                       .set_uid(CudnnfMHAUid::P_ID)
-                       .set_data_type(cudnn_frontend::DataType_t::FLOAT));
   bool is_causal = mask_type == dnn::FMHAMaskKind::CAUSAL ||
                    mask_type == dnn::FMHAMaskKind::PADDING_CAUSAL;
   auto sdpa_backward_options =
@@ -5322,7 +5211,44 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
           .set_attn_scale(scale)
           .set_compute_data_type(cudnn_frontend::DataType_t::FLOAT);
 
-  // Setting bias
+  int uid_offset = 0;
+
+  std::shared_ptr<Tensor_attributes> q =
+      graph.tensor(Tensor_attributes()
+                       .set_name("Q")
+                       .set_dim(q_desc.GetCudnnCompatibleDimensions(false))
+                       .set_stride(q_desc.GetCudnnCompatibleStrides(false))
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(ioDataType));
+  std::shared_ptr<Tensor_attributes> k =
+      graph.tensor(Tensor_attributes()
+                       .set_name("K")
+                       .set_dim(k_desc.GetCudnnCompatibleDimensions(false))
+                       .set_stride(k_desc.GetCudnnCompatibleStrides(false))
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(ioDataType));
+  std::shared_ptr<Tensor_attributes> v =
+      graph.tensor(Tensor_attributes()
+                       .set_name("V")
+                       .set_dim(v_desc.GetCudnnCompatibleDimensions(true))
+                       .set_stride(v_desc.GetCudnnCompatibleStrides(true))
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(ioDataType));
+  std::shared_ptr<Tensor_attributes> stats =
+      graph.tensor(Tensor_attributes()
+                       .set_name("stats")
+                       .set_dim(p_reduction_dims)
+                       .set_stride(p_reduction_strides)
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(cudnn_frontend::DataType_t::FLOAT));
+  std::shared_ptr<Tensor_attributes> dO =
+      graph.tensor(Tensor_attributes()
+                       .set_name("dO")
+                       .set_dim(do_desc.GetCudnnCompatibleDimensions(false))
+                       .set_stride(do_desc.GetCudnnCompatibleStrides(false))
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(ioDataType));
+  std::shared_ptr<Tensor_attributes> d_bias_tensor = nullptr;
   if (use_bias) {
     DCHECK(bias_descriptor != std::nullopt);
     auto bias_dim = bias_descriptor->dimensions();
@@ -5335,21 +5261,29 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
                          .set_name("bias")
                          .set_dim(bias_descriptor->dimensions())
                          .set_stride(bias_descriptor->GetLogicalStrides())
-                         .set_uid(CudnnfMHAUid::BIAS_ID));
+                         .set_uid(CuDnnTensorUID(uid_offset++)));
     sdpa_backward_options.set_bias(bias_tensor);
 
     // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s] are not supported for
     // dbias calculation but they are supported for forward bias calculation
+    // Set UID later: this is the last output tensor.
     if (b == 1 && n == q_n) {
-      auto d_bias_tensor =
+      d_bias_tensor =
           graph.tensor(Tensor_attributes()
                            .set_name("dBias")
                            .set_dim(bias_descriptor->dimensions())
-                           .set_stride(bias_descriptor->GetLogicalStrides())
-                           .set_uid(CudnnfMHAUid::dBIAS_ID));
+                           .set_stride(bias_descriptor->GetLogicalStrides()));
       sdpa_backward_options.set_dbias(d_bias_tensor);
     }
   }
+  std::shared_ptr<Tensor_attributes> o =
+      graph.tensor(Tensor_attributes()
+                       .set_name("O")
+                       .set_dim(do_desc.GetCudnnCompatibleDimensions(false))
+                       .set_stride(do_desc.GetCudnnCompatibleStrides(false))
+                       .set_uid(CuDnnTensorUID(uid_offset++))
+                       .set_data_type(ioDataType));
+
   // Setting actual seqlen
   bool is_padding = mask_type == dnn::FMHAMaskKind::PADDING ||
                     mask_type == dnn::FMHAMaskKind::PADDING_CAUSAL;
@@ -5361,14 +5295,14 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
                          .set_name("seq_q")
                          .set_dim({b, 1, 1, 1})
                          .set_stride({1, 1, 1, 1})
-                         .set_uid(CudnnfMHAUid::Q_SEQLEN_ID)
+                         .set_uid(CuDnnTensorUID(uid_offset++))
                          .set_data_type(cudnn_frontend::DataType_t::INT32));
     auto seq_kv_tensor =
         graph.tensor(Tensor_attributes()
                          .set_name("seq_kv")
                          .set_dim({b, 1, 1, 1})
                          .set_stride({1, 1, 1, 1})
-                         .set_uid(CudnnfMHAUid::K_SEQLEN_ID)
+                         .set_uid(CuDnnTensorUID(uid_offset++))
                          .set_data_type(cudnn_frontend::DataType_t::INT32));
     sdpa_backward_options.set_padding_mask(true);
     sdpa_backward_options.set_seq_len_q(seq_q_tensor);
@@ -5376,25 +5310,25 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
   }
   // Setting seed and offset
   if (use_dropout) {
-    DCHECK(dropout_rate != std::nullopt);
-    auto seed_tensor =
-        graph.tensor(Tensor_attributes()
-                         .set_name("seed")
-                         .set_dim({1, 1, 1, 1})
-                         .set_stride({1, 1, 1, 1})
-                         .set_data_type(cudnn_frontend::DataType_t::INT64)
-                         .set_is_pass_by_value(true)
-                         .set_uid(CudnnfMHAUid::D_SEED_ID));
-    auto offset_tensor =
-        graph.tensor(Tensor_attributes()
-                         .set_name("offset")
-                         .set_dim({1, 1, 1, 1})
-                         .set_stride({1, 1, 1, 1})
-                         .set_data_type(cudnn_frontend::DataType_t::INT64)
-                         .set_is_pass_by_value(true)
-                         .set_uid(CudnnfMHAUid::D_OFFSET_ID));
-    sdpa_backward_options.set_dropout((float)dropout_rate.value(), seed_tensor,
-                                      offset_tensor);
+    LOG(FATAL) << "FIXME";
+    // DCHECK(dropout_rate != std::nullopt);
+    // auto seed_tensor =
+    //     graph.tensor(Tensor_attributes()
+    //                      .set_name("seed")
+    //                      .set_dim({1, 1, 1, 1})
+    //                      .set_stride({1, 1, 1, 1})
+    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
+    //                      .set_is_pass_by_value(true));
+    // auto offset_tensor =
+    //     graph.tensor(Tensor_attributes()
+    //                      .set_name("offset")
+    //                      .set_dim({1, 1, 1, 1})
+    //                      .set_stride({1, 1, 1, 1})
+    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
+    //                      .set_is_pass_by_value(true));
+    // sdpa_backward_options.set_dropout((float)dropout_rate.value(),
+    // seed_tensor,
+    //                                   offset_tensor);
   }
 
   auto [dQ, dK, dV] =
@@ -5403,21 +5337,24 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
   dQ->set_output(true)
       .set_dim(dq_desc.dimensions())
       .set_stride(dq_desc.GetLogicalStrides())
+      .set_uid(CuDnnTensorUID(uid_offset++))
       .set_name("dQ")
-      .set_uid(CudnnfMHAUid::dQ_ID)
       .set_data_type(ioDataType);
   dK->set_output(true)
       .set_dim(dk_desc.dimensions())
       .set_stride(dk_desc.GetLogicalStrides())
+      .set_uid(CuDnnTensorUID(uid_offset++))
       .set_name("dK")
-      .set_uid(CudnnfMHAUid::dK_ID)
       .set_data_type(ioDataType);
   dV->set_output(true)
       .set_dim(dv_desc.dimensions())
       .set_stride(dv_desc.GetLogicalStrides())
+      .set_uid(CuDnnTensorUID(uid_offset++))
       .set_name("dV")
-      .set_uid(CudnnfMHAUid::dV_ID)
       .set_data_type(ioDataType);
+  if (d_bias_tensor != nullptr) {
+    d_bias_tensor->set_uid(CuDnnTensorUID(uid_offset++));
+  }
 
   CudnnGraph cudnnGraph(std::move(graph));
   TF_ASSIGN_OR_RETURN(bool supported, cudnnGraph.Prepare(dnn_support));
@@ -5757,8 +5694,8 @@ absl::Status CudnnSupport::DoConvolve(
 }
 
 // Utility for dealing with CUDA's type-erased scaling parameters, where some
-// sets of parameters expect a void* pointing at a float while others expect it
-// to point at a double.
+// sets of parameters expect a void* pointing at a float while others expect
+// it to point at a double.
 //
 // This is rather ugly, but its purpose is to quarantine the corresponding
 // ugliness that already exists in the CUDA API.
@@ -5782,9 +5719,9 @@ class ScalingParam {
   //
   // See
   // https://docs.nvidia.com/deeplearning/cudnn/developer-guide/index.html#scaling-parameters
-  // for more info; the behavior for int8 result tensors is not described there,
-  // but is maintained from the existing behavior (namely, using a float scaling
-  // parameter).
+  // for more info; the behavior for int8 result tensors is not described
+  // there, but is maintained from the existing behavior (namely, using a
+  // float scaling parameter).
   void* ToVoidPointer(dnn::DataType element_type) {
     if (element_type == dnn::DataType::kDouble) {
       return &as_double_;
@@ -5856,10 +5793,11 @@ absl::StatusOr<std::vector<BackendDescriptor>> GetDescriptorAttribute(
   absl::c_transform(result, std::back_inserter(raw_ptrs),
                     [](const BackendDescriptor& ptr) { return ptr.get(); });
 
-  // This API evidently does a deep copy of the descriptors into the pointers in
-  // the output array, rather than writing pointers to the descriptors into the
-  // output array.  So, this writes the memory behind each BackendDescriptor in
-  // result, rather than writing the contents of raw_ptrs.
+  // This API evidently does a deep copy of the descriptors into the pointers
+  // in the output array, rather than writing pointers to the descriptors into
+  // the output array.  So, this writes the memory behind each
+  // BackendDescriptor in result, rather than writing the contents of
+  // raw_ptrs.
   RETURN_IF_CUDNN_ERROR(cudnnBackendGetAttribute(
       desc, name, CUDNN_TYPE_BACKEND_DESCRIPTOR, n, &n, raw_ptrs.data()));
 
@@ -5895,9 +5833,9 @@ absl::StatusOr<dnn::AlgorithmDesc> ExecutionPlanToAlgorithmDesc(
       cudnnBackendGetAttribute(engines[0].get(), CUDNN_ATTR_ENGINE_GLOBAL_INDEX,
                                CUDNN_TYPE_INT64, 1, &n, &engine_id));
 
-  // Apparently for CUDNN_ATTR_ENGINECFG_KNOB_CHOICES only, trying to query the
-  // number of elements in the attribute by using an output limit value of 0
-  // just returns 0; the only way to find out how many there are is to
+  // Apparently for CUDNN_ATTR_ENGINECFG_KNOB_CHOICES only, trying to query
+  // the number of elements in the attribute by using an output limit value of
+  // 0 just returns 0; the only way to find out how many there are is to
   // pre-allocate space for every existing knob type (as an upper bound on the
   // number of knob choices a config can have), and then look back at how many
   // were filled.
@@ -6109,103 +6047,7 @@ class CudnnExecutionPlanRunner<void(Args...)>
   std::vector<int64_t> scalar_input_uids_;
   std::vector<ScalingParam> scalar_input_values_;
 };
-#endif  // CUDNN_VERSION >= 8100
 
-template <typename Sig>
-class CudnnGraphRunner;
-// An OpRunner implemented by a cuDNN frontend graph.
-//
-// This is the class holding the implementation of ToString, GetWorkspaceSize,
-// and operator() for use by the cudnn frontend op runners.
-template <typename... Args>
-class CudnnGraphRunner<void(Args...)> : public dnn::OpRunner<void(Args...)> {
- private:
-  using Graph = cudnn_frontend::graph::Graph;
-  using Tensor_attributes = cudnn_frontend::graph::Tensor_attributes;
-
- public:
-  std::string ToString() const override { return graph_.Graph().print(); }
-
-  size_t GetWorkspaceSize() const override {
-    return graph_.Graph().get_workspace_size();
-  }
-
-  absl::StatusOr<dnn::AlgorithmDesc> ToAlgorithmDesc() const override {
-    return absl::InternalError(
-        "Unexpected call to CudnnGraphRunner::ToAlgorithmDesc");
-  }
-
-  absl::Status operator()(Stream* stream, dnn::ProfileResult* profile_result,
-                          DeviceMemoryBase scratch_memory,
-                          Args... inputs) const override {
-    if (parent_ != stream->parent()) {
-      return tsl::errors::Internal(
-          "CudnnExecutionPlanRunner cached across multiple StreamExecutors.");
-    }
-    CudnnHandle handle = cudnn_->GetHandle(parent_, stream);
-    std::unordered_map<int64_t, void*> variant_pack;
-    std::vector<void*> vec = {inputs.opaque()...};
-
-    // add device buffers to the variant pack
-    for (int i = 0; i < uids_.size(); ++i) {
-      if (uids_[i].has_value()) {
-        variant_pack[*uids_[i]] = vec[i];
-      }
-    }
-    if (dropout_rng_offset_increment_ > 0) {
-#if CUDNN_VERSION >= 8800
-      variant_pack[CudnnfMHAUid::D_SEED_ID] = (void*)&dropout_rng_seed_;
-      current_dropout_rng_offset_ += dropout_rng_offset_increment_;
-      variant_pack[CudnnfMHAUid::D_OFFSET_ID] =
-          (void*)&current_dropout_rng_offset_;
-#else
-      return absl::UnimplementedError(
-          "Cudnn dropout offset and seed are only supported with Cudnn >= "
-          "8.8.0");
-#endif  // CUDNN_VERSION >= 8800
-    }
-    int workspace = graph_.Graph().get_workspace_size();
-    if (workspace > scratch_memory.size()) {
-      return tsl::errors::Internal(
-          absl::StrFormat("CuDNN FMHA requires %d workspace, got %d workspace.",
-                          workspace, scratch_memory.size()));
-    }
-    RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.Graph().execute(
-        handle.handle(), variant_pack, scratch_memory.opaque()));
-
-    return tsl::OkStatus();
-  }
-
-  static absl::StatusOr<CudnnGraphRunner> Create(
-      GpuExecutor* parent, CudnnAccess* cudnn, CudnnGraph graph,
-      int64_t dropout_rng_seed, int64_t dropout_rng_offset,
-      std::vector<std::optional<int64_t>> uids) {
-    return CudnnGraphRunner(parent, cudnn, std::move(graph), dropout_rng_seed,
-                            dropout_rng_offset, uids);
-  }
-
- private:
-  CudnnGraphRunner(GpuExecutor* parent, CudnnAccess* cudnn, CudnnGraph graph,
-                   int64_t dropout_rng_seed, int64_t dropout_rng_offset,
-                   std::vector<std::optional<int64_t>> uids)
-      : parent_(parent),
-        cudnn_(cudnn),
-        graph_(std::move(graph)),
-        dropout_rng_seed_(dropout_rng_seed),
-        current_dropout_rng_offset_(0),
-        dropout_rng_offset_increment_(dropout_rng_offset),
-        uids_(uids) {}
-  GpuExecutor* parent_;
-  CudnnAccess* cudnn_;
-  Stream* stream_;
-  CudnnGraph graph_;
-  int64_t dropout_rng_seed_;
-  mutable int64_t current_dropout_rng_offset_;
-  int64_t dropout_rng_offset_increment_;
-  std::vector<std::optional<int64_t>> uids_;
-};
-
-#if CUDNN_VERSION >= 8100
 namespace {
 
 template <typename Sig>
@@ -6991,7 +6833,8 @@ absl::Status CudnnSupport::GetFusedMatmulRunners(
       use_fallback, out_exec_plans, /*need_side_input=*/true, numeric_options);
 #else
   return tsl::errors::Unimplemented(
-      "Cudnn execution plans for matmul are only supported with Cudnn >= 8.4.");
+      "Cudnn execution plans for matmul are only supported with Cudnn >= "
+      "8.4.");
 #endif  // CUDNN_VERSION >= 8400
 }
 
@@ -7191,76 +7034,6 @@ int64_t GetDropoutRngOffset(std::vector<int64_t>& intermediate_shape) {
   int64_t max_seq_len = std::max(q_seq_len, kv_seq_len);
   int64_t cudnn_mha_num_threads = 256;
   return max_seq_len * max_seq_len / cudnn_mha_num_threads;
-}
-
-absl::StatusOr<std::unique_ptr<const dnn::FusedMHABackwardRunner>>
-CudnnSupport::FusedMHABackwardRunnerFromDesc(
-    Stream* stream, const dnn::AlgorithmDesc& algorithm_desc,
-    const dnn::MatmulTensorDescriptor& bmm1_grad_gemm1_rhs_descriptor,
-    const dnn::MatmulTensorDescriptor& bmm1_grad_gemm2_rhs_descriptor,
-    const dnn::MatmulTensorDescriptor& bmm2_grad_gemm1_lhs_descriptor,
-    const dnn::MatmulTensorDescriptor& bmm2_grad_gemm2_rhs_descriptor,
-    const dnn::MatmulTensorDescriptor& d_output_descriptor,
-    const dnn::TensorDescriptor& d_bmm1_lhs_descriptor,
-    const dnn::TensorDescriptor& d_bmm1_rhs_descriptor,
-    const dnn::TensorDescriptor& d_bmm2_rhs_descriptor,
-    std::optional<dnn::TensorDescriptor> d_s_descriptor,
-    std::optional<dnn::TensorDescriptor> d_bias_descriptor,
-    std::optional<dnn::TensorDescriptor> fwd_output_descriptor,
-    std::optional<dnn::TensorDescriptor> bias_descriptor, double scale,
-    std::optional<double> dropout_rate, std::optional<int64_t> seed,
-    dnn::FMHAMaskKind mask_type) {
-#if CUDNN_VERSION >= 8904
-  auto cudnn = cudnn_->GetHandle(parent_, stream);
-
-  bool use_dropout = dropout_rate && *dropout_rate > 0.0;
-  std::vector<int64_t> intermediate_shape;
-
-  TF_ASSIGN_OR_RETURN(
-      auto graph,
-      GetCudnnFlashAttentionBackwardOperationGraph(
-          *this, bmm1_grad_gemm1_rhs_descriptor, bmm1_grad_gemm2_rhs_descriptor,
-          bmm2_grad_gemm1_lhs_descriptor, bmm2_grad_gemm2_rhs_descriptor,
-          d_output_descriptor, d_bmm1_lhs_descriptor, d_bmm1_rhs_descriptor,
-          d_bmm2_rhs_descriptor, bias_descriptor, dropout_rate, seed, scale,
-          use_dropout, bias_descriptor != std::nullopt, mask_type));
-
-  std::vector<int64_t> p_dims =
-      bmm2_grad_gemm1_lhs_descriptor.GetCudnnCompatibleDimensions(false);
-  intermediate_shape = p_dims;
-  int64_t dropout_rng_offset = GetDropoutRngOffset(intermediate_shape);
-  int64_t dropout_rng_seed = seed.has_value() ? *seed : 0;
-
-  std::vector<std::optional<int64_t>> uids;
-  uids = {CudnnfMHAUid::Q_ID,  CudnnfMHAUid::K_ID,  CudnnfMHAUid::P_ID,
-          CudnnfMHAUid::V_ID,  CudnnfMHAUid::dO_ID, CudnnfMHAUid::dQ_ID,
-          CudnnfMHAUid::dK_ID, CudnnfMHAUid::dV_ID, std::nullopt};
-  uids.emplace_back(d_bias_descriptor.has_value()
-                        ? std::optional<CudnnfMHAUid>(CudnnfMHAUid::dBIAS_ID)
-                        : std::nullopt);
-  uids.push_back(CudnnfMHAUid::O_ID);
-  uids.emplace_back(bias_descriptor.has_value()
-                        ? std::optional<CudnnfMHAUid>(CudnnfMHAUid::BIAS_ID)
-                        : std::nullopt);
-  bool is_padding = mask_type == dnn::FMHAMaskKind::PADDING ||
-                    mask_type == dnn::FMHAMaskKind::PADDING_CAUSAL;
-  uids.emplace_back(is_padding
-                        ? std::optional<CudnnfMHAUid>(CudnnfMHAUid::Q_SEQLEN_ID)
-                        : std::nullopt);
-  uids.emplace_back(is_padding
-                        ? std::optional<CudnnfMHAUid>(CudnnfMHAUid::K_SEQLEN_ID)
-                        : std::nullopt);
-  TF_ASSIGN_OR_RETURN(auto runner,
-                      CudnnGraphRunner<dnn::FusedMHABackwardSignature>::Create(
-                          parent_, cudnn_.get(), graph, dropout_rng_seed,
-                          dropout_rng_offset, uids));
-  return {std::make_unique<CudnnGraphRunner<dnn::FusedMHABackwardSignature>>(
-      std::move(runner))};
-#else
-  return absl::UnimplementedError(
-      "Cudnn flash attention bwd are only "
-      "supported with Cudnn >= 8.9.4");
-#endif  // CUDNN_VERSION >= 8904
 }
 
 bool CudnnSupport::GetRnnAlgorithms(

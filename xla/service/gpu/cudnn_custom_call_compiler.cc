@@ -32,7 +32,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
-#include "xla/service/gpu/gpu_fused_mha_runner.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/stream_executor_util.h"
 #include "xla/stream_executor/cuda/cuda_dnn.h"
@@ -46,28 +45,392 @@ namespace gpu {
 
 namespace {
 
+inline absl::StatusOr<CudnnfMHAMaskKind> AsCudnnFmhaMaskKind(
+    CudnnfMHABackendConfig_MaskType mask_type) {
+  switch (mask_type) {
+    case CudnnfMHABackendConfig::NO_MASK:
+      return CudnnfMHAMaskKind::kNoMask;
+    case CudnnfMHABackendConfig::PADDING:
+      return CudnnfMHAMaskKind::kPadding;
+    case CudnnfMHABackendConfig::CAUSAL:
+      return CudnnfMHAMaskKind::kCausal;
+    case CudnnfMHABackendConfig::PADDING_CAUSAL:
+      return CudnnfMHAMaskKind::kPaddingCausal;
+    case CudnnfMHABackendConfig::ALIBI:
+      return CudnnfMHAMaskKind::kAlibi;
+    default:
+      return xla::Internal("Unknown fmha mask kind.");
+  }
+}
+
+// This is an interim structure to hold the parameters to construct a
+// GpufMHAConfig.
+// Struct to describe properties of a FMHA without being tied to specific
+// IR. Will be used to help build FMHA thunks from either XLA HLO or
+// LHLO GPU dialect in MLIR.
+struct GpufMHADescriptor {
+  CudnnfMHAKind kind;
+  CudnnfMHABackendConfig backend_config;
+  CudnnfMHAMaskKind mask_type;
+  Shape lhs_bmm1_shape;
+  Shape rhs_bmm1_shape;
+  Shape rhs_bmm2_shape;
+  Shape intermediate_lhs_bmm2_shape;
+  // This will contain both output shape and activation shape
+  absl::InlinedVector<Shape, 2> output_shapes;
+  DotDimensionNumbers bmm1_dnums;
+  DotDimensionNumbers bmm2_dnums;
+
+  std::optional<Shape> mask_shape;
+  std::optional<Shape> bias_shape;
+};
+
+struct GpufMHABackwardDescriptor {
+  CudnnfMHAKind kind;
+  CudnnfMHABackendConfig backend_config;
+  CudnnfMHAMaskKind mask_type;
+  Shape bmm1_grad_gemm1_rhs_shape;
+  Shape bmm1_grad_gemm2_rhs_shape;
+  Shape bmm2_grad_gemm1_lhs_shape;
+  Shape bmm2_grad_gemm2_rhs_shape;
+  Shape d_output_shape;
+  Shape d_bmm1_lhs_shape;
+  Shape d_bmm1_rhs_shape;
+  Shape d_bmm2_rhs_shape;
+  DotDimensionNumbers bmm1_grad_gemm1_dnums;
+  DotDimensionNumbers bmm1_grad_gemm2_dnums;
+  DotDimensionNumbers bmm2_grad_gemm1_dnums;
+  DotDimensionNumbers bmm2_grad_gemm2_dnums;
+
+  std::optional<Shape> d_s_shape;
+  std::optional<Shape> fwd_output_shape;
+  std::optional<Shape> mask_shape;
+  std::optional<Shape> d_bias_shape;
+  std::optional<Shape> bias_shape;
+};
+
+// Structure to describe static properties of a GPU fused Multi-Headed
+// Attention.
+struct GpufMHAConfig {
+  static absl::StatusOr<GpufMHAConfig> For(const GpufMHADescriptor &fmha_desc);
+  PrimitiveType
+      input_type;  // Capture the primitive type of one of the inputs of BMM1
+  PrimitiveType output_type;
+  CudnnfMHAKind kind;
+  std::optional<double> fmha_scale;
+  std::optional<double> dropout_rate;
+  std::optional<int64_t> seed;
+
+  se::dnn::AlgorithmDesc algorithm;
+  CudnnfMHAMaskKind mask_type;
+  // bias -> [1, num_attn_heads, q_seq_len, kv_seq_len]
+  // mask -> [batch_size, 1, q_seq_len, kv_seq_len]
+  se::dnn::MatmulTensorDescriptor lhs_bmm1;
+  se::dnn::MatmulTensorDescriptor rhs_bmm1;
+  se::dnn::MatmulTensorDescriptor rhs_bmm2;
+  se::dnn::MatmulTensorDescriptor intermediate_lhs_bmm2;
+  se::dnn::TensorDescriptor output;
+
+  std::optional<se::dnn::TensorDescriptor> activation;
+  std::optional<se::dnn::TensorDescriptor> mask;
+  std::optional<se::dnn::TensorDescriptor> bias;
+};
+
+// Structure to describe static properties of a GPU fused Multi-Headed
+// Attention backward.
+struct GpufMHABackwardConfig {
+  static absl::StatusOr<GpufMHABackwardConfig> For(
+      const GpufMHABackwardDescriptor &fmha_desc);
+  PrimitiveType
+      input_type;  // Capture the primitive type of one of the inputs of BMM1
+  PrimitiveType output_type;
+  CudnnfMHAKind kind;
+  std::optional<double> fmha_scale;
+  std::optional<double> dropout_rate;
+  std::optional<int64_t> seed;
+
+  se::dnn::AlgorithmDesc algorithm;
+  CudnnfMHAMaskKind mask_type;
+  // mask -> [batch_size, 1, q_seq_len, kv_seq_len]
+  // d_bias -> [1, num_heads, q_seq_len, kv_seq_len]
+  se::dnn::MatmulTensorDescriptor bmm1_grad_gemm1_rhs;
+  se::dnn::MatmulTensorDescriptor bmm1_grad_gemm2_rhs;
+  se::dnn::MatmulTensorDescriptor bmm2_grad_gemm1_lhs;
+  se::dnn::MatmulTensorDescriptor bmm2_grad_gemm2_rhs;
+  se::dnn::MatmulTensorDescriptor d_output;
+  se::dnn::TensorDescriptor d_bmm1_lhs;
+  se::dnn::TensorDescriptor d_bmm1_rhs;
+  se::dnn::TensorDescriptor d_bmm2_rhs;
+  std::optional<se::dnn::TensorDescriptor> d_s;
+  std::optional<se::dnn::TensorDescriptor> mask;
+  std::optional<se::dnn::TensorDescriptor> d_bias;
+  std::optional<se::dnn::TensorDescriptor> fwd_output;
+  std::optional<se::dnn::TensorDescriptor> bias;
+};
+
+using se::DeviceMemory;
+using se::DeviceMemoryBase;
+using se::dnn::DataType;
+using se::dnn::MatmulTensorDescriptor;
+using se::dnn::TensorDescriptor;
+
+/*static*/ absl::StatusOr<GpufMHAConfig> GpufMHAConfig::For(
+    const GpufMHADescriptor &desc) {
+  // Get shapes from desc.
+  const Shape &lhs_bmm1_shape = desc.lhs_bmm1_shape;
+  const Shape &rhs_bmm1_shape = desc.rhs_bmm1_shape;
+  const Shape &rhs_bmm2_shape = desc.rhs_bmm2_shape;
+  const Shape &intermediate_lhs_bmm2_shape = desc.intermediate_lhs_bmm2_shape;
+  const Shape &output_shape = desc.output_shapes[0];
+
+  // Get DNN dtype from primtive types
+  TF_ASSIGN_OR_RETURN(
+      DataType lhs_bmm1_type,
+      GetDNNDataTypeFromPrimitiveType(lhs_bmm1_shape.element_type()));
+  TF_ASSIGN_OR_RETURN(
+      DataType rhs_bmm1_type,
+      GetDNNDataTypeFromPrimitiveType(rhs_bmm1_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(
+      DataType rhs_bmm2_type,
+      GetDNNDataTypeFromPrimitiveType(rhs_bmm2_shape.element_type()));
+  TF_ASSIGN_OR_RETURN(DataType lhs_bmm2_type,
+                      GetDNNDataTypeFromPrimitiveType(
+                          intermediate_lhs_bmm2_shape.element_type()));
+  TF_ASSIGN_OR_RETURN(DataType output_type, GetDNNDataTypeFromPrimitiveType(
+                                                output_shape.element_type()));
+  GpufMHAConfig config;
+  config.input_type = lhs_bmm1_shape.element_type();
+  config.output_type = output_shape.element_type();
+
+  // Get MatmulTensorDescriptors for BMM1
+  config.lhs_bmm1 =
+      MatmulTensorDescriptor::For(lhs_bmm1_type, lhs_bmm1_shape.dimensions(),
+                                  desc.lhs_bmm1_shape.layout().minor_to_major(),
+                                  desc.bmm1_dnums.lhs_batch_dimensions(),
+                                  desc.bmm1_dnums.lhs_contracting_dimensions());
+  config.rhs_bmm1 =
+      MatmulTensorDescriptor::For(rhs_bmm1_type, rhs_bmm1_shape.dimensions(),
+                                  desc.rhs_bmm1_shape.layout().minor_to_major(),
+                                  desc.bmm1_dnums.rhs_batch_dimensions(),
+                                  desc.bmm1_dnums.rhs_contracting_dimensions());
+
+  // Get MatmulTensorDescriptors for BMM2
+  config.rhs_bmm2 =
+      MatmulTensorDescriptor::For(rhs_bmm2_type, rhs_bmm2_shape.dimensions(),
+                                  desc.rhs_bmm2_shape.layout().minor_to_major(),
+                                  desc.bmm2_dnums.rhs_batch_dimensions(),
+                                  desc.bmm2_dnums.rhs_contracting_dimensions());
+
+  config.intermediate_lhs_bmm2 = MatmulTensorDescriptor::For(
+      lhs_bmm2_type, intermediate_lhs_bmm2_shape.dimensions(),
+      desc.intermediate_lhs_bmm2_shape.layout().minor_to_major(),
+      desc.bmm2_dnums.lhs_batch_dimensions(),
+      desc.bmm2_dnums.lhs_contracting_dimensions());
+
+  config.output = TensorDescriptor::For(output_type, output_shape.dimensions(),
+                                        output_shape.layout().minor_to_major());
+
+  if (desc.output_shapes.size() > 1) {
+    const Shape &activation_shape = desc.output_shapes.back();
+    // Generally, activation should have same type as output, but set it
+    // explicityly just to be safe.
+    TF_ASSIGN_OR_RETURN(
+        DataType activation_type,
+        GetDNNDataTypeFromPrimitiveType(activation_shape.element_type()));
+    config.activation =
+        TensorDescriptor::For(activation_type, activation_shape.dimensions(),
+                              activation_shape.layout().minor_to_major());
+  }
+
+  if (desc.mask_shape) {
+    const Shape &mask_shape = *desc.mask_shape;
+    TF_ASSIGN_OR_RETURN(DataType mask_type, GetDNNDataTypeFromPrimitiveType(
+                                                mask_shape.element_type()));
+    config.mask = TensorDescriptor::For(mask_type, mask_shape.dimensions(),
+                                        mask_shape.layout().minor_to_major());
+  }
+
+  if (desc.bias_shape) {
+    const Shape &bias_shape = *desc.bias_shape;
+    TF_ASSIGN_OR_RETURN(DataType bias_type, GetDNNDataTypeFromPrimitiveType(
+                                                bias_shape.element_type()));
+    config.bias = TensorDescriptor::For(bias_type, bias_shape.dimensions(),
+                                        bias_shape.layout().minor_to_major());
+  }
+  config.kind = desc.kind;
+  config.mask_type = desc.mask_type;
+  const CudnnfMHABackendConfig &backend_config = desc.backend_config;
+  config.algorithm = se::dnn::AlgorithmDesc(backend_config.algorithm());
+  config.fmha_scale.emplace(backend_config.fmha_scale());
+  config.dropout_rate.emplace(backend_config.dropout_rate());
+  config.seed.emplace(backend_config.seed());
+  return config;
+}
+
+/*static*/ absl::StatusOr<GpufMHABackwardConfig> GpufMHABackwardConfig::For(
+    const GpufMHABackwardDescriptor &desc) {
+  // Get shapes from desc.
+
+  const Shape &bmm1_grad_gemm1_rhs_shape = desc.bmm1_grad_gemm1_rhs_shape;
+  const Shape &bmm1_grad_gemm2_rhs_shape = desc.bmm1_grad_gemm2_rhs_shape;
+  const Shape &bmm2_grad_gemm1_lhs_shape = desc.bmm2_grad_gemm1_lhs_shape;
+  const Shape &bmm2_grad_gemm2_rhs_shape = desc.bmm2_grad_gemm2_rhs_shape;
+  const Shape &d_output_shape = desc.d_output_shape;
+  const Shape &d_bmm1_lhs_shape = desc.d_bmm1_lhs_shape;
+  const Shape &d_bmm1_rhs_shape = desc.d_bmm1_rhs_shape;
+  const Shape &d_bmm2_rhs_shape = desc.d_bmm2_rhs_shape;
+  // Get DNN dtype from primtive types
+  TF_ASSIGN_OR_RETURN(DataType bmm1_grad_gemm1_rhs_type,
+                      GetDNNDataTypeFromPrimitiveType(
+                          bmm1_grad_gemm1_rhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(DataType bmm1_grad_gemm2_rhs_type,
+                      GetDNNDataTypeFromPrimitiveType(
+                          bmm1_grad_gemm2_rhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(DataType bmm2_grad_gemm1_lhs_type,
+                      GetDNNDataTypeFromPrimitiveType(
+                          bmm2_grad_gemm1_lhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(DataType bmm2_grad_gemm2_rhs_type,
+                      GetDNNDataTypeFromPrimitiveType(
+                          bmm2_grad_gemm2_rhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(
+      DataType d_output_type,
+      GetDNNDataTypeFromPrimitiveType(d_output_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(
+      DataType d_bmm1_lhs_type,
+      GetDNNDataTypeFromPrimitiveType(d_bmm1_lhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(
+      DataType d_bmm1_rhs_type,
+      GetDNNDataTypeFromPrimitiveType(d_bmm1_rhs_shape.element_type()));
+
+  TF_ASSIGN_OR_RETURN(
+      DataType d_bmm2_rhs_type,
+      GetDNNDataTypeFromPrimitiveType(d_bmm2_rhs_shape.element_type()));
+
+  GpufMHABackwardConfig config;
+  config.input_type = bmm1_grad_gemm1_rhs_shape.element_type();
+  config.output_type = d_bmm1_lhs_shape.element_type();
+
+  // Get MatmulTensorDescriptors for lhs of BMM1 grad GEMM 1
+  config.bmm1_grad_gemm1_rhs = MatmulTensorDescriptor::For(
+      bmm1_grad_gemm1_rhs_type, bmm1_grad_gemm1_rhs_shape.dimensions(),
+      desc.bmm1_grad_gemm1_rhs_shape.layout().minor_to_major(),
+      desc.bmm1_grad_gemm1_dnums.rhs_batch_dimensions(),
+      desc.bmm1_grad_gemm1_dnums.rhs_contracting_dimensions());
+
+  // Get MatmulTensorDescriptors for rhs of BMM1 grad GEMM 2
+  config.bmm1_grad_gemm2_rhs = MatmulTensorDescriptor::For(
+      bmm1_grad_gemm2_rhs_type, bmm1_grad_gemm2_rhs_shape.dimensions(),
+      desc.bmm1_grad_gemm2_rhs_shape.layout().minor_to_major(),
+      desc.bmm1_grad_gemm2_dnums.rhs_batch_dimensions(),
+      desc.bmm1_grad_gemm2_dnums.rhs_contracting_dimensions());
+
+  // Get MatmulTensorDescriptors for BMM2 grad GEMM 1
+  config.bmm2_grad_gemm1_lhs = MatmulTensorDescriptor::For(
+      bmm2_grad_gemm1_lhs_type, bmm2_grad_gemm1_lhs_shape.dimensions(),
+      desc.bmm2_grad_gemm1_lhs_shape.layout().minor_to_major(),
+      desc.bmm2_grad_gemm1_dnums.lhs_batch_dimensions(),
+      desc.bmm2_grad_gemm1_dnums.lhs_contracting_dimensions());
+
+  config.d_output = MatmulTensorDescriptor::For(
+      d_output_type, d_output_shape.dimensions(),
+      desc.d_output_shape.layout().minor_to_major(),
+      desc.bmm2_grad_gemm1_dnums.rhs_batch_dimensions(),
+      desc.bmm2_grad_gemm1_dnums.rhs_contracting_dimensions());
+
+  // Get MatmulTensorDescriptors for BMM2 grad GEMM 2
+  config.bmm2_grad_gemm2_rhs = MatmulTensorDescriptor::For(
+      bmm2_grad_gemm2_rhs_type, bmm2_grad_gemm2_rhs_shape.dimensions(),
+      desc.bmm2_grad_gemm2_rhs_shape.layout().minor_to_major(),
+      desc.bmm2_grad_gemm2_dnums.rhs_batch_dimensions(),
+      desc.bmm2_grad_gemm2_dnums
+          .rhs_contracting_dimensions());  // FMHA TODO: transpose here?
+
+  config.d_bmm1_lhs =
+      TensorDescriptor::For(d_bmm1_lhs_type, d_bmm1_lhs_shape.dimensions(),
+                            d_bmm1_lhs_shape.layout().minor_to_major());
+  config.d_bmm1_rhs =
+      TensorDescriptor::For(d_bmm1_rhs_type, d_bmm1_rhs_shape.dimensions(),
+                            d_bmm1_rhs_shape.layout().minor_to_major());
+  config.d_bmm2_rhs =
+      TensorDescriptor::For(d_bmm2_rhs_type, d_bmm2_rhs_shape.dimensions(),
+                            d_bmm2_rhs_shape.layout().minor_to_major());
+  config.d_s = TensorDescriptor::For(
+      bmm2_grad_gemm1_lhs_type, bmm2_grad_gemm1_lhs_shape.dimensions(),
+      bmm2_grad_gemm1_lhs_shape.layout().minor_to_major());
+
+  if (desc.d_bias_shape) {
+    const Shape &d_bias_shape = *desc.d_bias_shape;
+    // Get DNN dtype from primtive types
+    TF_ASSIGN_OR_RETURN(DataType d_bias_type, GetDNNDataTypeFromPrimitiveType(
+                                                  d_bias_shape.element_type()));
+    config.d_bias =
+        TensorDescriptor::For(d_bias_type, d_bias_shape.dimensions(),
+                              d_bias_shape.layout().minor_to_major());
+  }
+
+  if (desc.mask_shape) {
+    const Shape &mask_shape = *desc.mask_shape;
+    TF_ASSIGN_OR_RETURN(DataType mask_type, GetDNNDataTypeFromPrimitiveType(
+                                                mask_shape.element_type()));
+    config.mask = TensorDescriptor::For(mask_type, mask_shape.dimensions(),
+                                        mask_shape.layout().minor_to_major());
+  }
+  if (desc.fwd_output_shape) {
+    const Shape &fwd_output_shape = *desc.fwd_output_shape;
+    TF_ASSIGN_OR_RETURN(
+        DataType fwd_output_type,
+        GetDNNDataTypeFromPrimitiveType(fwd_output_shape.element_type()));
+    config.fwd_output =
+        TensorDescriptor::For(fwd_output_type, fwd_output_shape.dimensions(),
+                              fwd_output_shape.layout().minor_to_major());
+  }
+
+  if (desc.bias_shape) {
+    const Shape &bias_shape = *desc.bias_shape;
+    TF_ASSIGN_OR_RETURN(DataType bias_type, GetDNNDataTypeFromPrimitiveType(
+                                                bias_shape.element_type()));
+    config.bias = TensorDescriptor::For(bias_type, bias_shape.dimensions(),
+                                        bias_shape.layout().minor_to_major());
+  }
+
+  config.kind = desc.kind;
+  config.mask_type = desc.mask_type;
+  const CudnnfMHABackendConfig &backend_config = desc.backend_config;
+  config.algorithm = se::dnn::AlgorithmDesc(backend_config.algorithm());
+  config.fmha_scale.emplace(backend_config.fmha_scale());
+  config.dropout_rate.emplace(backend_config.dropout_rate());
+  config.seed.emplace(backend_config.seed());
+  return config;
+}
+
 // create cuDNN graphs from HloCustomCall
 absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
-    se::dnn::DnnSupport& dnn_support,
-    const HloCustomCallInstruction* custom_call) {
+    se::dnn::DnnSupport &dnn_support,
+    const HloCustomCallInstruction *custom_call) {
   if (IsFwdCustomCallTofMHA(*custom_call)) {
-    TF_ASSIGN_OR_RETURN(const xla::gpu::CudnnfMHAKind kind,
-                        xla::gpu::GetCudnnfMHAKind(custom_call));
+    TF_ASSIGN_OR_RETURN(const CudnnfMHAKind kind,
+                        GetCudnnfMHAKind(custom_call));
     std::optional<Shape> mask_shape, bias_shape;
     {
       bool has_bias = kind == CudnnfMHAKind::kScaleBiasSoftmax ||
                       kind == CudnnfMHAKind::kScaleBiasSoftmaxDropout;
 
       if (has_bias) {
-        const HloInstruction* bias = custom_call->operand(3);
+        const HloInstruction *bias = custom_call->operand(3);
         bias_shape = bias->shape();
       }
     }
 
-    TF_ASSIGN_OR_RETURN(
-        const auto gpu_config,
-        custom_call->backend_config<xla::gpu::GpuBackendConfig>());
-    const xla::gpu::CudnnfMHABackendConfig& config =
+    TF_ASSIGN_OR_RETURN(const auto gpu_config,
+                        custom_call->backend_config<GpuBackendConfig>());
+    const CudnnfMHABackendConfig &config =
         gpu_config.cudnn_fmha_backend_config();
     Shape intermediate_tensor_shape(config.intermediate_tensor_shape());
     absl::InlinedVector<Shape, 2> output_shapes = {
@@ -113,10 +476,9 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
             fmha_config.dropout_rate, dnn_mask_type));
     return std::move(graph);
   } else {
-    TF_ASSIGN_OR_RETURN(
-        const auto gpu_config,
-        custom_call->backend_config<xla::gpu::GpuBackendConfig>());
-    const xla::gpu::CudnnfMHABackendConfig& config =
+    TF_ASSIGN_OR_RETURN(const auto gpu_config,
+                        custom_call->backend_config<GpuBackendConfig>());
+    const CudnnfMHABackendConfig &config =
         gpu_config.cudnn_fmha_backend_config();
 
     int input_index = 0;
@@ -143,9 +505,8 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
 
     std::optional<Shape> fwd_output_shape =
         custom_call->operand(input_index++)->shape();
-    if (config.mask_type() == xla::gpu::CudnnfMHABackendConfig::PADDING ||
-        config.mask_type() ==
-            xla::gpu::CudnnfMHABackendConfig::PADDING_CAUSAL) {
+    if (config.mask_type() == CudnnfMHABackendConfig::PADDING ||
+        config.mask_type() == CudnnfMHABackendConfig::PADDING_CAUSAL) {
       // skip q_seqlen and kv_seqlen
       input_index += 2;
     }
@@ -214,21 +575,21 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
 
 class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit CuDnnCustomCallVisitor(se::dnn::DnnSupport& dnn_support,
-                                  BinaryMap& compilation_results)
+  explicit CuDnnCustomCallVisitor(se::dnn::DnnSupport &dnn_support,
+                                  BinaryMap &compilation_results)
       : dnn_support_(dnn_support), compilation_results_(compilation_results) {}
 
-  void AddWorkspace(HloInstruction& hlo, int64_t workspace_size) {
+  void AddWorkspace(HloInstruction &hlo, int64_t workspace_size) {
     if (workspace_size == 0) {
       return;
     }
     VLOG(4) << "Applying workspace size " << workspace_size << " to "
             << hlo.ToString();
-    Shape* shape = hlo.mutable_shape();
+    Shape *shape = hlo.mutable_shape();
     shape->mutable_tuple_shapes()->back().set_dimensions(0, workspace_size);
   }
 
-  absl::Status HandleCustomCall(HloInstruction* hlo) override {
+  absl::Status HandleCustomCall(HloInstruction *hlo) override {
     if (!IsCustomCallTofMHA(*hlo)) {
       // don't do anything about other cuDNN custom calls
       return absl::OkStatus();
@@ -254,7 +615,7 @@ class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
       // Compute a new fingerprint with a potential workspace for the
       // compilation results to match a fingerprint computed by the emitter.
       compilation_results_[hlo->ToString(HloPrintOptions::Fingerprint())] =
-          std::string(reinterpret_cast<char*>(serialized_graph.data()),
+          std::string(reinterpret_cast<char *>(serialized_graph.data()),
                       serialized_graph.size());
     } else {
       VLOG(4) << "Cache hit.";
@@ -266,16 +627,16 @@ class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
   }
 
  private:
-  se::dnn::DnnSupport& dnn_support_;
-  BinaryMap& compilation_results_;
+  se::dnn::DnnSupport &dnn_support_;
+  BinaryMap &compilation_results_;
   absl::flat_hash_map<std::string, int64_t> workspace_sizes_;
 };
 
 }  // namespace
 
 absl::StatusOr<bool> CuDnnCustomCallCompiler::Run(
-    HloModule* module,
-    const absl::flat_hash_set<absl::string_view>& execution_threads) {
+    HloModule *module,
+    const absl::flat_hash_set<absl::string_view> &execution_threads) {
   XLA_SCOPED_LOGGING_TIMER_LEVEL("cuDNN custom call compiler", 8);
   return CuDnnCustomCallVisitor(dnn_support_, compilation_results_)
       .RunOnModule(module, execution_threads);

@@ -328,7 +328,6 @@ cc_library(
         ":cublas_cudnn",
         ":gpu_asm_opts_util",
         ":gpu_conv_runner",
-        ":gpu_fused_mha_runner",
         ":gpu_norm_runner",
         ":hlo_fusion_analysis",
         ":ir_emission_utils",
@@ -369,9 +368,9 @@ cc_library(
         "//xla/service/gpu/runtime:conditional_thunk",
         "//xla/service/gpu/runtime:convolution_thunk",
         "//xla/service/gpu/runtime:copy_thunk",
+        "//xla/service/gpu/runtime:cudnn_thunk",
         "//xla/service/gpu/runtime:custom_call_thunk",
         "//xla/service/gpu/runtime:fft_thunk",
-        "//xla/service/gpu/runtime:fused_mha_thunk",
         "//xla/service/gpu/runtime:gemm_thunk",
         "//xla/service/gpu/runtime:infeed_thunk",
         "//xla/service/gpu/runtime:kernel_thunk",
@@ -2068,36 +2067,6 @@ cc_library(
 )
 
 cc_library(
-    name = "gpu_fused_mha_runner",
-    srcs = ["gpu_fused_mha_runner.cc"],
-    hdrs = ["gpu_fused_mha_runner.h"],
-    deps = [
-        ":backend_configs_cc",
-        ":cublas_cudnn",
-        ":stream_executor_util",
-        "//xla:shape_util",
-        "//xla:status",
-        "//xla:status_macros",
-        "//xla:statusor",
-        "//xla:types",
-        "//xla:util",
-        "//xla:xla_data_proto_cc",
-        "//xla/hlo/ir:hlo",
-        "//xla/stream_executor",
-        "//xla/stream_executor:dnn",
-        "//xla/stream_executor:lazy_op_runner",
-        "@com_google_absl//absl/container:inlined_vector",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@eigen_archive//:eigen3",
-        "@tsl//tsl/platform:statusor",
-    ],
-)
-
-cc_library(
     name = "gpu_conv_rewriter",
     srcs = ["gpu_conv_rewriter.cc"],
     hdrs = ["gpu_conv_rewriter.h"],
@@ -3000,7 +2969,6 @@ cc_library(
     deps = if_cuda_is_configured([
         ":backend_configs_cc",
         ":ir_emission_utils",
-        ":gpu_fused_mha_runner",
         ":cublas_cudnn",
         ":stream_executor_util",
         "@com_google_absl//absl/log",

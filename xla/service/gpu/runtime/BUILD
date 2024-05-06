@@ -633,24 +633,6 @@ cc_library(
 )
 
 cc_library(
-    name = "fused_mha_thunk",
-    srcs = ["fused_mha_thunk.cc"],
-    hdrs = ["fused_mha_thunk.h"],
-    deps = [
-        "//xla:util",
-        "//xla:xla_data_proto_cc",
-        "//xla/service:buffer_assignment",
-        "//xla/service/gpu:gpu_fused_mha_runner",
-        "//xla/service/gpu/runtime:thunk",
-        "//xla/stream_executor",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/synchronization",
-    ],
-)
-
-cc_library(
     name = "gemm_thunk",
     srcs = ["gemm_thunk.cc"],
     hdrs = ["gemm_thunk.h"],
