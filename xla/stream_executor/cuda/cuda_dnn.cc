@@ -5091,24 +5091,28 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
     sdpa_options.set_seq_len_kv(seq_kv_tensor);
   }
   // Setting seed and offset
+  std::shared_ptr<Tensor_attributes> seed_tensor = nullptr;
+  std::shared_ptr<Tensor_attributes> offset_tensor = nullptr;
   if (use_dropout) {
-    LOG(FATAL) << "FIXME";
-    // auto seed_tensor =
-    //     graph.tensor(Tensor_attributes()
-    //                      .set_name("seed")
-    //                      .set_dim({1, 1, 1, 1})
-    //                      .set_stride({1, 1, 1, 1})
-    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
-    //                      .set_is_pass_by_value(true));
-    // auto offset_tensor =
-    //     graph.tensor(Tensor_attributes()
-    //                      .set_name("offset")
-    //                      .set_dim({1, 1, 1, 1})
-    //                      .set_stride({1, 1, 1, 1})
-    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
-    //                      .set_is_pass_by_value(true));
-    // sdpa_options.set_dropout((float)dropout_rate.value(), seed_tensor,
-    //                          offset_tensor);
+    // Skip setting UIDs: pass by value tensors go at the end.
+    seed_tensor =
+        graph.tensor(Tensor_attributes()
+                         .set_name("seed")
+                         .set_dim({1, 1, 1, 1})
+                         .set_stride({1, 1, 1, 1})
+                         .set_data_type(cudnn_frontend::DataType_t::INT64)
+                         .set_is_pass_by_value(true)
+                         .set_uid(CuDnnTensorUID(uid_offset++)));
+    offset_tensor =
+        graph.tensor(Tensor_attributes()
+                         .set_name("offset")
+                         .set_dim({1, 1, 1, 1})
+                         .set_stride({1, 1, 1, 1})
+                         .set_data_type(cudnn_frontend::DataType_t::INT64)
+                         .set_is_pass_by_value(true)
+                         .set_uid(CuDnnTensorUID(uid_offset++)));
+    sdpa_options.set_dropout((float)dropout_rate.value(), seed_tensor,
+                             offset_tensor);
   }
 
   // Add SDPA to the graph.
@@ -5134,6 +5138,12 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionOperationGraph(
         .set_dim(stat_dims)
         .set_stride(stat_strides)
         .set_uid(CuDnnTensorUID(uid_offset++));
+  }
+  if (seed_tensor != nullptr) {
+    seed_tensor->set_uid(CuDnnTensorUID(uid_offset++));
+  }
+  if (offset_tensor != nullptr) {
+    offset_tensor->set_uid(CuDnnTensorUID(uid_offset++));
   }
   CudnnGraph cudnnGraph(std::move(graph));
   TF_ASSIGN_OR_RETURN(bool supported, cudnnGraph.Prepare(dnn_support));
@@ -5266,7 +5276,7 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
 
     // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s] are not supported for
     // dbias calculation but they are supported for forward bias calculation
-    // Set UID later: this is the last output tensor.
+    // Set UID later: this is the last output tuple element.
     if (b == 1 && n == q_n) {
       d_bias_tensor =
           graph.tensor(Tensor_attributes()
@@ -5309,26 +5319,27 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
     sdpa_backward_options.set_seq_len_kv(seq_kv_tensor);
   }
   // Setting seed and offset
+  std::shared_ptr<Tensor_attributes> seed_tensor = nullptr;
+  std::shared_ptr<Tensor_attributes> offset_tensor = nullptr;
   if (use_dropout) {
-    LOG(FATAL) << "FIXME";
-    // DCHECK(dropout_rate != std::nullopt);
-    // auto seed_tensor =
-    //     graph.tensor(Tensor_attributes()
-    //                      .set_name("seed")
-    //                      .set_dim({1, 1, 1, 1})
-    //                      .set_stride({1, 1, 1, 1})
-    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
-    //                      .set_is_pass_by_value(true));
-    // auto offset_tensor =
-    //     graph.tensor(Tensor_attributes()
-    //                      .set_name("offset")
-    //                      .set_dim({1, 1, 1, 1})
-    //                      .set_stride({1, 1, 1, 1})
-    //                      .set_data_type(cudnn_frontend::DataType_t::INT64)
-    //                      .set_is_pass_by_value(true));
-    // sdpa_backward_options.set_dropout((float)dropout_rate.value(),
-    // seed_tensor,
-    //                                   offset_tensor);
+    DCHECK(dropout_rate != std::nullopt);
+    // Skip setting UIDs: pass by value tensors go at the end.
+    seed_tensor =
+        graph.tensor(Tensor_attributes()
+                         .set_name("seed")
+                         .set_dim({1, 1, 1, 1})
+                         .set_stride({1, 1, 1, 1})
+                         .set_data_type(cudnn_frontend::DataType_t::INT64)
+                         .set_is_pass_by_value(true));
+    offset_tensor =
+        graph.tensor(Tensor_attributes()
+                         .set_name("offset")
+                         .set_dim({1, 1, 1, 1})
+                         .set_stride({1, 1, 1, 1})
+                         .set_data_type(cudnn_frontend::DataType_t::INT64)
+                         .set_is_pass_by_value(true));
+    sdpa_backward_options.set_dropout((float)dropout_rate.value(), seed_tensor,
+                                      offset_tensor);
   }
 
   auto [dQ, dK, dV] =
@@ -5354,6 +5365,12 @@ absl::StatusOr<CudnnGraph> GetCudnnFlashAttentionBackwardOperationGraph(
       .set_data_type(ioDataType);
   if (d_bias_tensor != nullptr) {
     d_bias_tensor->set_uid(CuDnnTensorUID(uid_offset++));
+  }
+  if (seed_tensor != nullptr) {
+    seed_tensor->set_uid(CuDnnTensorUID(uid_offset++));
+  }
+  if (offset_tensor != nullptr) {
+    offset_tensor->set_uid(CuDnnTensorUID(uid_offset++));
   }
 
   CudnnGraph cudnnGraph(std::move(graph));
@@ -8115,9 +8132,7 @@ absl::Status CudnnGraph::Build(dnn::DnnSupport& dnn_support,
 
 absl::Status CudnnGraph::Execute(Stream& stream,
                                  absl::Span<DeviceMemoryBase> operands) const {
-  std::unordered_map<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>,
-                     void*>
-      tensor_to_ptr_map;
+  std::unordered_map<int64_t, void*> tensor_to_ptr_map;
   absl::Span<DeviceMemoryBase> operands_without_workspace = operands;
   DeviceMemoryBase workspace;
   if (graph_.get_workspace_size() != 0) {
@@ -8127,14 +8142,23 @@ absl::Status CudnnGraph::Execute(Stream& stream,
   }
   int operand_number = 0;
   for (DeviceMemoryBase operand : operands_without_workspace) {
-    const cudnn_frontend::graph::Tensor_attributes attr =
-        cudnn_frontend::graph::Tensor_attributes().set_uid(
-            CuDnnTensorUID(operand_number));
-    ++operand_number;
-    tensor_to_ptr_map
-        [std::make_shared<cudnn_frontend::graph::Tensor_attributes>(attr)] =
-            operand.opaque();
+    tensor_to_ptr_map[CuDnnTensorUID(operand_number++)] = operand.opaque();
   }
+
+  if (dropout_rng_offset_increment_ > 0) {
+#if CUDNN_VERSION >= 8800
+    tensor_to_ptr_map[CuDnnTensorUID(operand_number++)] =
+        (void*)&dropout_rng_seed_;
+    current_dropout_rng_offset_ += dropout_rng_offset_increment_;
+    tensor_to_ptr_map[CuDnnTensorUID(operand_number++)] =
+        (void*)&current_dropout_rng_offset_;
+#else
+    return absl::UnimplementedError(
+        "Cudnn dropout offset and seed are only supported with Cudnn >= "
+        "8.8.0");
+#endif  // CUDNN_VERSION >= 8800
+  }
+
   const CudnnSupport& dnn_support =
       static_cast<CudnnSupport&>(*stream.parent()->AsDnn());
   RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.execute(

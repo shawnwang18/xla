@@ -70,6 +70,9 @@ class CudnnGraph : public dnn::DnnGraph {
 
  private:
   cudnn_frontend::graph::Graph graph_;
+  int64_t dropout_rng_seed_;
+  mutable int64_t current_dropout_rng_offset_;
+  int64_t dropout_rng_offset_increment_ = 0;
 };
 #endif  // CUDNN_VERSION >= 8100
 
