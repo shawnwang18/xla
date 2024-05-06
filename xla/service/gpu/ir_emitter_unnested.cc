@@ -968,7 +968,7 @@ absl::Status IrEmitterUnnested::EmitCuDnnThunk(
       KernelArguments::Create(ir_emitter_context_->buffer_assignment(), instr,
                               instr->operands()));
   AddThunkToThunkSequence(std::make_unique<CuDnnThunk>(
-      instr->ToString(HloPrintOptions::Fingerprint()),
+      instr->ToString(CuDnnThunk::FingerprintFormat()),
       Thunk::ThunkInfo::WithProfileAnnotation(instr), kernel_arguments.args()));
   return absl::OkStatus();
 }

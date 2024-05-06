@@ -33,6 +33,7 @@ limitations under the License.
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/ir_emission_utils.h"
+#include "xla/service/gpu/runtime/cudnn_thunk.h"
 #include "xla/service/gpu/stream_executor_util.h"
 #include "xla/stream_executor/cuda/cuda_dnn.h"
 #include "xla/stream_executor/cuda/cudnn_frontend_helpers.h"
@@ -596,7 +597,7 @@ class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
     }
 
     const std::string fingerprint_without_workspace =
-        hlo->ToString(HloPrintOptions::Fingerprint());
+        hlo->ToString(CuDnnThunk::FingerprintFormat());
     auto workspace_size_it =
         workspace_sizes_.find(fingerprint_without_workspace);
     if (workspace_size_it == workspace_sizes_.cend()) {
@@ -614,7 +615,7 @@ class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
       RETURN_IF_CUDNN_FRONTEND_ERROR(graph.Graph().serialize(serialized_graph));
       // Compute a new fingerprint with a potential workspace for the
       // compilation results to match a fingerprint computed by the emitter.
-      compilation_results_[hlo->ToString(HloPrintOptions::Fingerprint())] =
+      compilation_results_[hlo->ToString(CuDnnThunk::FingerprintFormat())] =
           std::string(reinterpret_cast<char *>(serialized_graph.data()),
                       serialized_graph.size());
     } else {

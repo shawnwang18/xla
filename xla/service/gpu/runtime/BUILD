@@ -1165,6 +1165,7 @@ cc_library(
     srcs = ["cudnn_thunk.cc"],
     hdrs = ["cudnn_thunk.h"],
     deps = [
+        "//xla/hlo/ir:hlo",
         "//xla/service:buffer_assignment",
         "//xla/service/gpu:kernel_arguments",
         "//xla/service/gpu/runtime:thunk",

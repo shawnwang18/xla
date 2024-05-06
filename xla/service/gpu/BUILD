@@ -2980,6 +2980,7 @@ cc_library(
         "//xla:shape_util",
         "//xla:util",
         "//xla/hlo/ir:hlo",
+        "//xla/service/gpu/runtime:cudnn_thunk",
         "//xla/service:hlo_pass",
         "//xla/stream_executor:stream_executor_headers",
         "//xla/stream_executor/cuda:cudnn_frontend_helpers",

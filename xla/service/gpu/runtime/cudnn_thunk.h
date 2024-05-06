@@ -23,6 +23,7 @@ limitations under the License.
 #include "absl/base/call_once.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/kernel_arguments.h"
 #include "xla/service/gpu/runtime/thunk.h"
@@ -46,6 +47,9 @@ class CuDnnThunk : public Thunk {
   std::shared_ptr<se::dnn::LazyDnnGraph> graph() const { return graph_; }
   const std::vector<BufferAllocation::Slice>& arguments() const {
     return args_;
+  }
+  static HloPrintOptions FingerprintFormat() {
+    return HloPrintOptions::Fingerprint().set_print_backend_config(true);
   }
 
  private:
