@@ -24,38 +24,6 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-FusedMHAThunk::FusedMHAThunk(
-    ThunkInfo thunk_info, GpufMHAConfig config,
-    BufferAllocation::Slice lhs_bmm1, BufferAllocation::Slice rhs_bmm1,
-    BufferAllocation::Slice rhs_bmm2, BufferAllocation::Slice output,
-    BufferAllocation::Slice scratch, BufferAllocation::Slice mask,
-    BufferAllocation::Slice bias, BufferAllocation::Slice activation,
-    BufferAllocation::Slice seqlen_q, BufferAllocation::Slice seqlen_k)
-    : Thunk(Kind::kFusedMHA, thunk_info),
-      lhs_bmm1_buffer_(lhs_bmm1),
-      rhs_bmm1_buffer_(rhs_bmm1),
-      rhs_bmm2_buffer_(rhs_bmm2),
-      output_buffer_(output),
-      scratch_buffer_(scratch),
-      bias_buffer_(bias),
-      activation_buffer_(activation),
-      seqlen_q_buffer_(seqlen_q),
-      seqlen_k_buffer_(seqlen_k),
-      config_(std::move(config)) {}
-
-FusedMultiHeadedAttentionRunner& FusedMHAThunk::GetOrCreateRunner(
-    const stream_executor::Stream* stream) {
-  absl::MutexLock lock(&mu_);
-  auto it = runner_cache_.find(stream);
-  if (it == runner_cache_.end()) {
-    it = runner_cache_
-             .insert({stream, std::make_unique<FusedMultiHeadedAttentionRunner>(
-                                  config_)})
-             .first;
-  }
-  return *it->second;
-}
-
 std::optional<se::DeviceMemoryBase> AssignBufferIfNotNull(
     const BufferAllocations& buffer_allocations,
     BufferAllocation::Slice& slice) {
@@ -65,39 +33,6 @@ std::optional<se::DeviceMemoryBase> AssignBufferIfNotNull(
              : std::nullopt;
 }
 
-absl::Status FusedMHAThunk::ExecuteOnStream(const ExecuteParams& params) {
-  const auto& buffer_allocations = *params.buffer_allocations;
-  se::DeviceMemoryBase lhs_bmm1_buffer =
-      buffer_allocations.GetDeviceAddress(lhs_bmm1_buffer_);
-  se::DeviceMemoryBase rhs_bmm1_buffer =
-      buffer_allocations.GetDeviceAddress(rhs_bmm1_buffer_);
-  se::DeviceMemoryBase rhs_bmm2_buffer =
-      buffer_allocations.GetDeviceAddress(rhs_bmm2_buffer_);
-  se::DeviceMemoryBase output_buffer =
-      buffer_allocations.GetDeviceAddress(output_buffer_);
-  se::DeviceMemoryBase scratch_buffer =
-      buffer_allocations.GetDeviceAddress(scratch_buffer_);
-
-  std::optional<se::DeviceMemoryBase> bias_buffer =
-      AssignBufferIfNotNull(buffer_allocations, bias_buffer_);
-  std::optional<se::DeviceMemoryBase> activation_buffer =
-      AssignBufferIfNotNull(buffer_allocations, activation_buffer_);
-  std::optional<se::DeviceMemoryBase> seqlen_q_buffer =
-      AssignBufferIfNotNull(buffer_allocations, seqlen_q_buffer_);
-  std::optional<se::DeviceMemoryBase> seqlen_k_buffer =
-      AssignBufferIfNotNull(buffer_allocations, seqlen_k_buffer_);
-  RunFusedMHAOptions opts;
-  opts.runner_cache = &GetOrCreateRunner(params.stream);
-  TF_RETURN_IF_ERROR(RunGpuFMHA(config_, lhs_bmm1_buffer, rhs_bmm1_buffer,
-                                rhs_bmm2_buffer, output_buffer, scratch_buffer,
-                                bias_buffer, activation_buffer, seqlen_q_buffer,
-                                seqlen_k_buffer, params.stream, opts));
-
-  if (!params.stream->ok()) {
-    return Internal("FusedMHAThunk::ExecuteOnStream failed.");
-  }
-  return absl::OkStatus();
-}
 FusedMHABackwardThunk::FusedMHABackwardThunk(
     ThunkInfo thunk_info, GpufMHABackwardConfig config,
     BufferAllocation::Slice bmm1_grad_gemm1_rhs,

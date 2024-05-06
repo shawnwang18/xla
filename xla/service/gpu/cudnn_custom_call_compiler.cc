@@ -13,10 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "xla/service/gpu/cudnn_workspace_rewriter.h"
+#include "xla/service/gpu/cudnn_custom_call_compiler.h"
 
 #include <optional>
-#include <string>
 #include <vector>
 
 #include "absl/log/check.h"
@@ -24,7 +23,6 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "third_party/gpus/cudnn/cudnn_version.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
@@ -32,8 +30,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/hlo/ir/hlo_opcode.h"
-#include "xla/primitive_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/gpu_fused_mha_runner.h"
@@ -49,9 +45,6 @@ namespace xla {
 namespace gpu {
 
 namespace {
-
-namespace fe = cudnn_frontend;
-namespace graph = fe::graph;
 
 // create cuDNN graphs from HloCustomCall
 absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
@@ -221,44 +214,70 @@ absl::StatusOr<se::gpu::CudnnGraph> HloCustomCallToCuDnnGraph(
 
 class CuDnnCustomCallVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit CuDnnCustomCallVisitor(se::dnn::DnnSupport& dnn_support)
-      : dnn_support_(dnn_support) {}
+  explicit CuDnnCustomCallVisitor(se::dnn::DnnSupport& dnn_support,
+                                  BinaryMap& compilation_results)
+      : dnn_support_(dnn_support), compilation_results_(compilation_results) {}
+
+  void AddWorkspace(HloInstruction& hlo, int64_t workspace_size) {
+    if (workspace_size == 0) {
+      return;
+    }
+    VLOG(4) << "Applying workspace size " << workspace_size << " to "
+            << hlo.ToString();
+    Shape* shape = hlo.mutable_shape();
+    shape->mutable_tuple_shapes()->back().set_dimensions(0, workspace_size);
+  }
 
   absl::Status HandleCustomCall(HloInstruction* hlo) override {
     if (!IsCustomCallTofMHA(*hlo)) {
       // don't do anything about other cuDNN custom calls
       return absl::OkStatus();
     }
-    TF_ASSIGN_OR_RETURN(auto gpu_config,
-                        hlo->backend_config<GpuBackendConfig>());
 
-    TF_ASSIGN_OR_RETURN(
-        se::gpu::CudnnGraph graph,
-        HloCustomCallToCuDnnGraph(dnn_support_,
-                                  DynCast<HloCustomCallInstruction>(hlo)));
-    auto workspace = graph.Graph().get_workspace_size();
-    if (workspace != 0) {
-      // rewrite custom call to have correct workspace size
-      VLOG(4) << "Rewriting: " << hlo->ToString();
-      Shape* shape = hlo->mutable_shape();
-      shape->mutable_tuple_shapes(shape->tuple_shapes_size() - 1)
-          ->set_dimensions(0, workspace);
-      MarkAsChanged();
+    const std::string fingerprint_without_workspace =
+        hlo->ToString(HloPrintOptions::Fingerprint());
+    auto workspace_size_it =
+        workspace_sizes_.find(fingerprint_without_workspace);
+    if (workspace_size_it == workspace_sizes_.cend()) {
+      TF_ASSIGN_OR_RETURN(
+          se::gpu::CudnnGraph graph,
+          HloCustomCallToCuDnnGraph(dnn_support_,
+                                    DynCast<HloCustomCallInstruction>(hlo)));
+
+      const int64_t workspace_size = graph.Graph().get_workspace_size();
+      workspace_sizes_.insert(workspace_size_it,
+                              {fingerprint_without_workspace, workspace_size});
+      AddWorkspace(*hlo, workspace_size);
+
+      std::vector<uint8_t> serialized_graph;
+      RETURN_IF_CUDNN_FRONTEND_ERROR(graph.Graph().serialize(serialized_graph));
+      // Compute a new fingerprint with a potential workspace for the
+      // compilation results to match a fingerprint computed by the emitter.
+      compilation_results_[hlo->ToString(HloPrintOptions::Fingerprint())] =
+          std::string(reinterpret_cast<char*>(serialized_graph.data()),
+                      serialized_graph.size());
+    } else {
+      VLOG(4) << "Cache hit.";
+      AddWorkspace(*hlo, workspace_size_it->second);
     }
+
+    MarkAsChanged();
     return absl::OkStatus();
   }
 
  private:
   se::dnn::DnnSupport& dnn_support_;
+  BinaryMap& compilation_results_;
+  absl::flat_hash_map<std::string, int64_t> workspace_sizes_;
 };
 
 }  // namespace
 
-absl::StatusOr<bool> CuDnnWorkspaceRewriter::Run(
+absl::StatusOr<bool> CuDnnCustomCallCompiler::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
-  XLA_SCOPED_LOGGING_TIMER("cuDNN workspace rewriter");
-  return CuDnnCustomCallVisitor(dnn_support_)
+  XLA_SCOPED_LOGGING_TIMER_LEVEL("cuDNN custom call compiler", 8);
+  return CuDnnCustomCallVisitor(dnn_support_, compilation_results_)
       .RunOnModule(module, execution_threads);
 }
 

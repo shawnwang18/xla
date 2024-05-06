@@ -1984,7 +1984,7 @@ absl::StatusOr<std::unique_ptr<Executable>> GpuCompiler::RunBackend(
   }};
   Thunk::BinaryMap dnn_compiled_graphs;
   if (stream_exec) {
-    TF_RETURN_IF_ERROR(RunCudnnFusionCompilerPass(module.get(), stream_exec,
+    TF_RETURN_IF_ERROR(RunCudnnCompilerPasses(module.get(), stream_exec,
                                                   &dnn_compiled_graphs));
   }
 

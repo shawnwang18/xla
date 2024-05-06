@@ -993,16 +993,6 @@ using FusedMatmulRunner = OpRunner<FusedMatmulSignature>;
 using NormSignature = void(std::vector<DeviceMemoryBase>);
 using NormRunner = OpRunner<NormSignature>;
 
-using FusedMHASignature = void(DeviceMemoryBase /*BMM1_inputA_data*/,
-                               DeviceMemoryBase /* BMM1_inputB_data */,
-                               DeviceMemoryBase /* BMM2_inputA_data */,
-                               DeviceMemoryBase /* output_data */,
-                               DeviceMemoryBase /* bias_data */,
-                               DeviceMemoryBase /* activation_data */,
-                               DeviceMemoryBase /* seqlen_q_data */,
-                               DeviceMemoryBase /* seqlen_k_data */);
-using FusedMHARunner = OpRunner<FusedMHASignature>;
-
 using FusedMHABackwardSignature = void(
     DeviceMemoryBase /* BMM1_GRAD_GEMM1_inputA_data */,
     DeviceMemoryBase /* BMM1_GRAD_GEMM2_inputB_data */,
@@ -1734,19 +1724,6 @@ class DnnSupport {
       absl::string_view) const {
     return absl::UnimplementedError("Graph support requires cuDNN >= 8.1.");
   };
-
-  virtual absl::StatusOr<std::unique_ptr<const FusedMHARunner>>
-  FusedMHARunnerFromDesc(
-      Stream* stream, const AlgorithmDesc& algorithm_desc,
-      const MatmulTensorDescriptor& bmm1_lhs_descriptor,
-      const MatmulTensorDescriptor& bmm1_rhs_descriptor,
-      const MatmulTensorDescriptor& bmm2_rhs_descriptor,
-      const MatmulTensorDescriptor& intermediate_bmm2_lhs_descriptor,
-      const TensorDescriptor& output_descriptor,
-      std::optional<TensorDescriptor> activation_descriptor,
-      std::optional<TensorDescriptor> bias_descriptor, double scale,
-      std::optional<double> dropout_rate, std::optional<int64_t> seed,
-      dnn::FMHAMaskKind mask_type);
 
   virtual absl::StatusOr<std::unique_ptr<const FusedMHABackwardRunner>>
   FusedMHABackwardRunnerFromDesc(

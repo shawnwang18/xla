@@ -164,7 +164,7 @@ class GpuCompiler : public LLVMCompiler {
   }
 
   // Runs CUDNN fusion compiler pass.
-  virtual absl::Status RunCudnnFusionCompilerPass(
+  virtual absl::Status RunCudnnCompilerPasses(
       HloModule* module, se::StreamExecutor* stream_exec,
       Thunk::BinaryMap* dnn_compiled_graphs) {
     return absl::OkStatus();

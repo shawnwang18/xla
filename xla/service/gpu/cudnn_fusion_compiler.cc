@@ -174,7 +174,7 @@ int FusionLevel(const HloInstruction& hlo) {
 class GemmDimensionAdapter {
   explicit GemmDimensionAdapter(const HloDotInstruction& dot,
                                 TritonFusionAnalysis analysis)
-      : analysis_(std::move(analysis)), dot_(dot) {};
+      : analysis_(std::move(analysis)), dot_(dot){};
 
  public:
   const TritonFusionAnalysis analysis_;
@@ -573,9 +573,8 @@ StatusOr<HloInstruction*> AddWorkspace(HloInstruction& fusion,
 
 class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit CuDnnFusionVisitor(
-      se::dnn::DnnSupport& dnn_support,
-      CuDnnFusionCompiler::BinaryMap& compilation_results)
+  explicit CuDnnFusionVisitor(se::dnn::DnnSupport& dnn_support,
+                              BinaryMap& compilation_results)
       : dnn_support_(dnn_support), compilation_results_(compilation_results) {}
 
   absl::Status HandleFusion(HloInstruction* hlo) override {
@@ -652,7 +651,7 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
  private:
   se::dnn::DnnSupport& dnn_support_;
   // <HLO computation fingerprint, serialized compiled cuDNN graph>.
-  CuDnnFusionCompiler::BinaryMap& compilation_results_;
+  BinaryMap& compilation_results_;
   absl::flat_hash_map<std::string, int64_t> workspace_sizes_;
 };
 

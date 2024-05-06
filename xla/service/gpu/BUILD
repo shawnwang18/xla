@@ -2994,9 +2994,9 @@ cc_library(
 )
 
 cc_library(
-    name = "cudnn_workspace_rewriter",
-    srcs = if_cuda_is_configured(["cudnn_workspace_rewriter.cc"]),
-    hdrs = if_cuda_is_configured(["cudnn_workspace_rewriter.h"]),
+    name = "cudnn_custom_call_compiler",
+    srcs = if_cuda_is_configured(["cudnn_custom_call_compiler.cc"]),
+    hdrs = if_cuda_is_configured(["cudnn_custom_call_compiler.h"]),
     deps = if_cuda_is_configured([
         ":backend_configs_cc",
         ":ir_emission_utils",
@@ -3755,10 +3755,10 @@ cc_library(
         ":cublas_cudnn",
         ":cublas_pad_for_gemms",
         ":cublas_padding_requirements",
+        ":cudnn_custom_call_compiler",
         ":cudnn_fused_conv_rewriter",
         ":cudnn_fused_mha_rewriter",
         ":cudnn_fused_mha_transpose_fusion",
-        ":cudnn_workspace_rewriter",
         ":cudnn_fusion_compiler",
         ":cudnn_norm_rewriter",
         ":cudnn_pad_for_convolutions",

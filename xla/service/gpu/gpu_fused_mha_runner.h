@@ -160,28 +160,6 @@ struct GpufMHABackwardConfig {
   std::optional<se::dnn::TensorDescriptor> bias;
 };
 
-// Implementation struct exposed for debugging and log analysis.
-struct GpufMHAParams {
-  static absl::StatusOr<GpufMHAParams> For(
-      const GpufMHAConfig& config, se::DeviceMemoryBase lhs_bmm1_buffer,
-      se::DeviceMemoryBase rhs_bmm1_buffer,
-      se::DeviceMemoryBase rhs_bmm2_buffer, se::DeviceMemoryBase output_buffer,
-      std::optional<se::DeviceMemoryBase> bias_buffer,
-      std::optional<se::DeviceMemoryBase> activation_buffer,
-      std::optional<se::DeviceMemoryBase> seqlen_q_buffer,
-      std::optional<se::DeviceMemoryBase> seqlen_k_buffer);
-
-  const GpufMHAConfig* config;  // Not owned
-  se::DeviceMemoryBase lhs_bmm1_buffer;
-  se::DeviceMemoryBase rhs_bmm1_buffer;
-  se::DeviceMemoryBase rhs_bmm2_buffer;
-  se::DeviceMemoryBase output_buffer;
-  std::optional<se::DeviceMemoryBase> activation_buffer;
-  std::optional<se::DeviceMemoryBase> bias_buffer;
-  std::optional<se::DeviceMemoryBase> seqlen_q_buffer;
-  std::optional<se::DeviceMemoryBase> seqlen_k_buffer;
-};
-
 struct GpufMHABackwardParams {
   static absl::StatusOr<GpufMHABackwardParams> For(
       const GpufMHABackwardConfig& config,
@@ -215,76 +193,6 @@ struct GpufMHABackwardParams {
   std::optional<se::DeviceMemoryBase> bias_buffer;
   std::optional<se::DeviceMemoryBase> seqlen_q_buffer;
   std::optional<se::DeviceMemoryBase> seqlen_k_buffer;
-};
-
-class FusedMultiHeadedAttentionRunner {
- public:
-  using Repr =
-      std::variant<std::monostate,  // To allow XXX default ctor
-                   std::unique_ptr<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>>>;
-
-  FusedMultiHeadedAttentionRunner() = default;
-
-  explicit FusedMultiHeadedAttentionRunner(
-      std::unique_ptr<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>> runner)
-      : repr_(std::move(runner)) {}
-
-  explicit FusedMultiHeadedAttentionRunner(Repr runner)
-      : repr_(std::move(runner)) {}
-
-  explicit FusedMultiHeadedAttentionRunner(const GpufMHAConfig& config)
-      : FusedMultiHeadedAttentionRunner(CreateRunner(config)) {
-    if (std::holds_alternative<std::monostate>(repr_)) {
-      CHECK(false) << "Cannot construct FusedMultiHeadedAttentionRunner with "
-                      "std::monostate";
-    }
-  }
-
-  se::dnn::AlgorithmDesc ToAlgorithmDesc() const {
-    return std::visit(ToAlgorithmDescVisitor{}, repr_);
-  }
-
-  se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>* AsFusedMHARunner() {
-    CHECK(std::holds_alternative<
-          std::unique_ptr<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>>>(repr_));
-    return std::get<
-               std::unique_ptr<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>>>(
-               repr_)
-        .get();
-  }
-
- private:
-  //  The CreateRunner function is defined as static because it
-  //  doesn't need access to any non-static member variables of the
-  //  FusedMultiHeadedAttentionRunner class. Defining it static makes it easy to
-  //  use and makes it clear that it is a utility function that doesn't rely on
-  //  the state of any specific instance of the class.
-  static Repr CreateRunner(const GpufMHAConfig& config) {
-    switch (config.kind) {
-      case CudnnfMHAKind::kSoftmaxDropout:
-      case CudnnfMHAKind::kSoftmax:
-      case CudnnfMHAKind::kScaleBiasSoftmax:
-      case CudnnfMHAKind::kScaleBiasSoftmaxDropout:
-        return std::make_unique<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>>(
-            config.algorithm);
-      default:
-        LOG(FATAL) << "Internal error: unsupported CUDNN MHA kind in "
-                      "FusedMultiHeadedAttentionRunner";
-    }
-  }
-
-  struct ToAlgorithmDescVisitor {
-    template <typename RunnerPtr>
-    se::dnn::AlgorithmDesc operator()(const RunnerPtr& runner) {
-      return runner->ToAlgorithmDesc();
-    }
-
-    se::dnn::AlgorithmDesc operator()(const std::monostate&) {
-      CHECK(false) << "Internal error: uninitialized runner in ToAlgorithmDesc";
-    }
-  };
-
-  Repr repr_;
 };
 
 class FusedMultiHeadedAttentionBackwardRunner {
@@ -362,17 +270,6 @@ class FusedMultiHeadedAttentionBackwardRunner {
   Repr repr_;
 };
 
-struct RunFusedMHAOptions {
-  // Nullable output-parameter pointer for profiling results.
-  // Profile results remain unused for now since cuDNN FMHA has only one
-  // algorithm for now.
-  se::dnn::ProfileResult* profile_result = nullptr;
-
-  // Use this runner cache (and its configured algorithm), instead of the one
-  // from the instruction.
-  FusedMultiHeadedAttentionRunner* runner_cache;
-};
-
 struct RunFusedMHABackwardOptions {
   // Nullable output-parameter pointer for profiling results.
   // Profile results remain unused for now since cuDNN FMHA has only one
@@ -383,18 +280,6 @@ struct RunFusedMHABackwardOptions {
   // from the instruction.
   FusedMultiHeadedAttentionBackwardRunner* runner_cache;
 };
-
-absl::Status RunGpuFMHA(const GpufMHAConfig& fmha_config,
-                        se::DeviceMemoryBase lhs_bmm1_buffer,
-                        se::DeviceMemoryBase rhs_bmm1_buffer,
-                        se::DeviceMemoryBase rhs_bmm2_buffer,
-                        se::DeviceMemoryBase output_buffer,
-                        se::DeviceMemoryBase scratch_buffer,
-                        std::optional<se::DeviceMemoryBase> bias_buffer,
-                        std::optional<se::DeviceMemoryBase> activation_buffer,
-                        std::optional<se::DeviceMemoryBase> seqlen_q_buffer,
-                        std::optional<se::DeviceMemoryBase> seqlen_k_buffer,
-                        se::Stream* stream, RunFusedMHAOptions = {});
 
 absl::Status RunGpuFMHABackward(
     const GpufMHABackwardConfig& fmha_config,

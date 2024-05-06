@@ -45,116 +45,6 @@ using se::dnn::DataType;
 using se::dnn::MatmulTensorDescriptor;
 using se::dnn::TensorDescriptor;
 
-template <typename ElementType, typename BiasType, typename OutputType>
-absl::Status RunFusedMHA(GpufMHAParams params, se::Stream *stream,
-                         RunFusedMHAOptions options,
-                         DeviceMemory<ElementType> lhs_bmm1_buffer,
-                         DeviceMemory<ElementType> rhs_bmm1_buffer,
-                         DeviceMemory<ElementType> rhs_bmm2_buffer,
-                         DeviceMemory<OutputType> output_buffer,
-                         DeviceMemoryBase bias_buffer,
-                         DeviceMemoryBase scratch_memory,
-                         DeviceMemoryBase activation_output,
-                         DeviceMemoryBase seqlen_q, DeviceMemoryBase seqlen_k) {
-  se::dnn::LazyOpRunner<se::dnn::FusedMHAOp> *lazy_runner =
-      options.runner_cache->AsFusedMHARunner();
-  std::optional<se::dnn::LazyOpRunner<se::dnn::FusedMHAOp>> local_runner;
-  if (!lazy_runner) {
-    local_runner.emplace(params.config->algorithm);
-    lazy_runner = &*local_runner;
-  }
-  std::optional<double> dropout_rate;
-  if (params.config->dropout_rate) {
-    dropout_rate = *params.config->dropout_rate;
-  }
-
-  double scale = 1.0;
-  if (params.config->fmha_scale) {
-    scale = *params.config->fmha_scale;
-  }
-
-  std::optional<int64_t> seed;
-  if (params.config->seed) {
-    seed = *params.config->seed;
-  }
-  TF_ASSIGN_OR_RETURN(
-      se::dnn::FMHAMaskKind mask_type,
-      GetDNNFmhaMaskKindFromCudnnFmhaMaskKind(params.config->mask_type));
-  se::dnn::FusedMHAOp::Config config{scale,
-                                     params.config->lhs_bmm1,
-                                     params.config->rhs_bmm1,
-                                     params.config->rhs_bmm2,
-                                     params.config->intermediate_lhs_bmm2,
-                                     params.config->output,
-                                     params.config->bias,
-                                     params.config->activation,
-                                     dropout_rate,
-                                     seed,
-                                     mask_type};
-  TF_ASSIGN_OR_RETURN(auto *runner,
-                      lazy_runner->GetOrCreateRunner(config, stream));
-  return (*runner)(stream, options.profile_result, scratch_memory,
-                   lhs_bmm1_buffer, rhs_bmm1_buffer, rhs_bmm2_buffer,
-                   output_buffer, bias_buffer, activation_output, seqlen_q,
-                   seqlen_k);
-}
-
-template <typename ElementType, typename BiasType, typename OutputType>
-absl::Status RunGpuFMHAImpl(const GpufMHAParams &params, se::Stream *stream,
-                            se::DeviceMemoryBase scratch_memory,
-                            RunFusedMHAOptions options) {
-  auto lhs_bmm1_buffer = se::DeviceMemory<ElementType>(params.lhs_bmm1_buffer);
-  auto rhs_bmm1_buffer = se::DeviceMemory<ElementType>(params.rhs_bmm1_buffer);
-  auto rhs_bmm2_buffer = se::DeviceMemory<ElementType>(params.rhs_bmm2_buffer);
-  auto output_buffer = se::DeviceMemory<OutputType>(params.output_buffer);
-  auto activation_buffer =
-      params.activation_buffer.has_value()
-          ? se::DeviceMemory<OutputType>(*params.activation_buffer)
-          : se::DeviceMemoryBase();
-  auto bias_buffer = params.bias_buffer.has_value()
-                         ? se::DeviceMemory<BiasType>(*params.bias_buffer)
-                         : se::DeviceMemoryBase();
-  auto seqlen_q_buffer =
-      params.seqlen_q_buffer.has_value()
-          ? se::DeviceMemory<BiasType>(*params.seqlen_q_buffer)
-          : se::DeviceMemoryBase();
-  auto seqlen_k_buffer =
-      params.seqlen_k_buffer.has_value()
-          ? se::DeviceMemory<BiasType>(*params.seqlen_k_buffer)
-          : se::DeviceMemoryBase();
-  se::dnn::AlgorithmDesc algorithm = params.config->algorithm;
-  if (options.runner_cache) {
-    algorithm = options.runner_cache->ToAlgorithmDesc();
-  }
-
-  absl::Status run_status = absl::OkStatus();
-  switch (params.config->kind) {
-    case CudnnfMHAKind::kSoftmaxDropout:
-    case CudnnfMHAKind::kSoftmax:
-    case CudnnfMHAKind::kScaleBiasSoftmax:
-    case CudnnfMHAKind::kScaleBiasSoftmaxDropout:
-      run_status = RunFusedMHA<ElementType, BiasType, OutputType>(
-          params, stream, options, lhs_bmm1_buffer, rhs_bmm1_buffer,
-          rhs_bmm2_buffer, output_buffer, bias_buffer, scratch_memory,
-          activation_buffer, seqlen_q_buffer, seqlen_k_buffer);
-      break;
-    default:
-      return Internal("Invalid cuDNN fMHA kind");
-  }
-
-  if (!run_status.ok()) {
-    return run_status;
-  }
-
-  if (!stream->ok()) {
-    return Internal("Unable to launch FMHA with type %s and algorithm %s",
-                    CudnnfMHAKindToString(params.config->kind),
-                    algorithm.ToString());
-  }
-
-  return absl::OkStatus();
-}
-
 template <typename ElementType, typename OutputType>
 absl::Status RunFusedMHABackward(
     GpufMHABackwardParams params, se::Stream *stream,
@@ -546,27 +436,6 @@ absl::Status RunGpuFMHABackwardImpl(const GpufMHABackwardParams &params,
   return config;
 }
 
-/*static*/ absl::StatusOr<GpufMHAParams> GpufMHAParams::For(
-    const GpufMHAConfig &config, se::DeviceMemoryBase lhs_bmm1_buffer,
-    se::DeviceMemoryBase rhs_bmm1_buffer, se::DeviceMemoryBase rhs_bmm2_buffer,
-    se::DeviceMemoryBase output_buffer,
-    std::optional<se::DeviceMemoryBase> bias_buffer,
-    std::optional<se::DeviceMemoryBase> activation_buffer,
-    std::optional<se::DeviceMemoryBase> seqlen_q_buffer,
-    std::optional<se::DeviceMemoryBase> seqlen_k_buffer) {
-  GpufMHAParams params;
-  params.config = &config;
-  params.lhs_bmm1_buffer = lhs_bmm1_buffer;
-  params.rhs_bmm1_buffer = rhs_bmm1_buffer;
-  params.rhs_bmm2_buffer = rhs_bmm2_buffer;
-  params.output_buffer = output_buffer;
-  params.activation_buffer = activation_buffer;
-  params.bias_buffer = bias_buffer;
-  params.seqlen_q_buffer = seqlen_q_buffer;
-  params.seqlen_k_buffer = seqlen_k_buffer;
-  return params;
-}
-
 /*static*/ absl::StatusOr<GpufMHABackwardParams> GpufMHABackwardParams::For(
     const GpufMHABackwardConfig &config,
     se::DeviceMemoryBase bmm1_grad_gemm1_rhs_buffer,
@@ -600,37 +469,6 @@ absl::Status RunGpuFMHABackwardImpl(const GpufMHABackwardParams &params,
   params.seqlen_q_buffer = seqlen_q_buffer;
   params.seqlen_k_buffer = seqlen_k_buffer;
   return params;
-}
-
-absl::Status RunGpuFMHA(const GpufMHAConfig &fmha_config,
-                        se::DeviceMemoryBase lhs_bmm1_buffer,
-                        se::DeviceMemoryBase rhs_bmm1_buffer,
-                        se::DeviceMemoryBase rhs_bmm2_buffer,
-                        se::DeviceMemoryBase output_buffer,
-                        se::DeviceMemoryBase scratch_buffer,
-                        std::optional<se::DeviceMemoryBase> bias_buffer,
-                        std::optional<se::DeviceMemoryBase> activation_buffer,
-                        std::optional<se::DeviceMemoryBase> seqlen_q_buffer,
-                        std::optional<se::DeviceMemoryBase> seqlen_k_buffer,
-                        se::Stream *stream, RunFusedMHAOptions options) {
-  TF_ASSIGN_OR_RETURN(
-      GpufMHAParams params,
-      GpufMHAParams::For(fmha_config, lhs_bmm1_buffer, rhs_bmm1_buffer,
-                         rhs_bmm2_buffer, output_buffer, bias_buffer,
-                         activation_buffer, seqlen_q_buffer, seqlen_k_buffer));
-  PrimitiveType input_primitive_type = fmha_config.input_type;
-  switch (input_primitive_type) {
-    case F16:
-      return RunGpuFMHAImpl<Eigen::half, Eigen::half, Eigen::half>(
-          params, stream, scratch_buffer, options);
-    case BF16:
-      return RunGpuFMHAImpl<Eigen::bfloat16, Eigen::bfloat16, Eigen::bfloat16>(
-          params, stream, scratch_buffer, options);
-    default:
-      return absl::UnimplementedError(absl::StrFormat(
-          "Unimplemented fused MHA with %s", ToString(fmha_config)));
-  }
-  return absl::OkStatus();
 }
 
 absl::Status RunGpuFMHABackward(

@@ -30,7 +30,7 @@ limitations under the License.
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
+#include "mlir/IR/Value.h"              // from @llvm-project
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/literal.h"
@@ -42,6 +42,9 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
+
+// <HLO computation fingerprint, corresponding compiled binary>.
+using BinaryMap = absl::flat_hash_map<std::string, std::string>;
 
 // If a dimensions is smaller than this, untiled transposition may be more
 // efficient.
