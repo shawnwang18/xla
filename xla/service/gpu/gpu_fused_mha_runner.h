@@ -27,6 +27,7 @@ limitations under the License.
 #include "absl/log/log.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
+#include "xla/service/gpu/stream_executor_util.h"
 #include "xla/shape.h"
 #include "xla/status.h"
 #include "xla/stream_executor/device_memory.h"
@@ -105,6 +106,19 @@ struct GpufMHABackwardDescriptor {
 // Attention.
 struct GpufMHAConfig {
   static absl::StatusOr<GpufMHAConfig> For(const GpufMHADescriptor& fmha_desc);
+  absl::StatusOr<se::dnn::FusedMHAOp::Config> AsDnnFusedMHAOpConfig() const {
+    double scale = 1.0;
+    if (fmha_scale.has_value()) {
+      scale = *fmha_scale;
+    }
+    TF_ASSIGN_OR_RETURN(se::dnn::FMHAMaskKind mask_type,
+                        GetDNNFmhaMaskKindFromCudnnFmhaMaskKind(mask_type));
+
+    return se::dnn::FusedMHAOp::Config{
+        scale,    lhs_bmm1, rhs_bmm1,   rhs_bmm2,     intermediate_lhs_bmm2,
+        output,   bias,     activation, dropout_rate, seed,
+        mask_type};
+  }
   PrimitiveType
       input_type;  // Capture the primitive type of one of the inputs of BMM1
   PrimitiveType output_type;
@@ -133,6 +147,31 @@ struct GpufMHAConfig {
 struct GpufMHABackwardConfig {
   static absl::StatusOr<GpufMHABackwardConfig> For(
       const GpufMHABackwardDescriptor& fmha_desc);
+  absl::StatusOr<se::dnn::FusedMHABackwardOp::Config>
+  AsDnnFusedMHABackwardOpConfig() const {
+    double scale = 1.0;
+    if (fmha_scale.has_value()) {
+      scale = *fmha_scale;
+    }
+    TF_ASSIGN_OR_RETURN(se::dnn::FMHAMaskKind mask_type,
+                        GetDNNFmhaMaskKindFromCudnnFmhaMaskKind(mask_type));
+    return se::dnn::FusedMHABackwardOp::Config{scale,
+                                               bmm1_grad_gemm1_rhs,
+                                               bmm1_grad_gemm2_rhs,
+                                               bmm2_grad_gemm1_lhs,
+                                               bmm2_grad_gemm2_rhs,
+                                               d_output,
+                                               d_bmm1_lhs,
+                                               d_bmm1_rhs,
+                                               d_bmm2_rhs,
+                                               d_s,
+                                               d_bias,
+                                               fwd_output,
+                                               bias,
+                                               dropout_rate,
+                                               seed,
+                                               mask_type};
+  }
   PrimitiveType
       input_type;  // Capture the primitive type of one of the inputs of BMM1
   PrimitiveType output_type;

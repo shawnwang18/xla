@@ -68,29 +68,13 @@ absl::Status RunFusedMHA(GpufMHAParams params, se::Stream *stream,
     dropout_rate = *params.config->dropout_rate;
   }
 
-  double scale = 1.0;
-  if (params.config->fmha_scale) {
-    scale = *params.config->fmha_scale;
-  }
-
   std::optional<int64_t> seed;
   if (params.config->seed) {
     seed = *params.config->seed;
   }
-  TF_ASSIGN_OR_RETURN(
-      se::dnn::FMHAMaskKind mask_type,
-      GetDNNFmhaMaskKindFromCudnnFmhaMaskKind(params.config->mask_type));
-  se::dnn::FusedMHAOp::Config config{scale,
-                                     params.config->lhs_bmm1,
-                                     params.config->rhs_bmm1,
-                                     params.config->rhs_bmm2,
-                                     params.config->intermediate_lhs_bmm2,
-                                     params.config->output,
-                                     params.config->bias,
-                                     params.config->activation,
-                                     dropout_rate,
-                                     seed,
-                                     mask_type};
+
+  TF_ASSIGN_OR_RETURN(se::dnn::FusedMHAOp::Config config,
+                      params.config->AsDnnFusedMHAOpConfig());
   TF_ASSIGN_OR_RETURN(auto *runner,
                       lazy_runner->GetOrCreateRunner(config, stream));
   return (*runner)(stream, options.profile_result, scratch_memory,
@@ -183,35 +167,13 @@ absl::Status RunFusedMHABackward(
     dropout_rate = *params.config->dropout_rate;
   }
 
-  double scale = 1.0;
-  if (params.config->fmha_scale) {
-    scale = *params.config->fmha_scale;
-  }
-
   std::optional<int64_t> seed;
   if (params.config->seed) {
     seed = *params.config->seed;
   }
 
-  TF_ASSIGN_OR_RETURN(
-      se::dnn::FMHAMaskKind mask_type,
-      GetDNNFmhaMaskKindFromCudnnFmhaMaskKind(params.config->mask_type));
-  se::dnn::FusedMHABackwardOp::Config config{scale,
-                                             params.config->bmm1_grad_gemm1_rhs,
-                                             params.config->bmm1_grad_gemm2_rhs,
-                                             params.config->bmm2_grad_gemm1_lhs,
-                                             params.config->bmm2_grad_gemm2_rhs,
-                                             params.config->d_output,
-                                             params.config->d_bmm1_lhs,
-                                             params.config->d_bmm1_rhs,
-                                             params.config->d_bmm2_rhs,
-                                             params.config->d_s,
-                                             params.config->d_bias,
-                                             params.config->fwd_output,
-                                             params.config->bias,
-                                             dropout_rate,
-                                             seed,
-                                             mask_type};
+  TF_ASSIGN_OR_RETURN(se::dnn::FusedMHABackwardOp::Config config,
+                      params.config->AsDnnFusedMHABackwardOpConfig());
   TF_ASSIGN_OR_RETURN(auto *runner,
                       lazy_runner->GetOrCreateRunner(config, stream));
   // TODO: pass in real softmax_sum, dQ_accum, fwd_output
