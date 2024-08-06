@@ -431,6 +431,22 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
         return true;
       };
 
+  auto setter_for_module_unstable_input_idxs =
+      [debug_options](std::string comma_separated_values) {
+        auto* input_idxs_map =
+            debug_options->mutable_module_unstable_input_idxs();
+        parse_idxs_map(input_idxs_map, comma_separated_values);
+        return true;
+      };
+
+  auto setter_for_module_unstable_output_idxs =
+      [debug_options](std::string comma_separated_values) {
+        auto* input_idxs_map =
+            debug_options->mutable_module_unstable_input_idxs();
+        parse_idxs_map(input_idxs_map, comma_separated_values);
+        return true;
+      };
+
   // Custom "sub-parser" lambda for xla_partitioning_algorithm.
   auto setter_for_xla_partitioning_algorithm =
       [debug_options](const std::string& value) {
@@ -1238,6 +1254,22 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
   flag_list->push_back(
       tsl::Flag("legacy_command_buffer_custom_call_targets",
                 setter_for_legacy_command_buffer_custom_call_targets, "",
+                "Comma-separated list of custom call targets with legacy "
+                "registry API (non FFI API), whose targets supports lowering "
+                "to command buffer custom command, i.e, custom call target "
+                "supports cuda-graph capturing for CUDA devices."));
+
+  flag_list->push_back(
+      tsl::Flag("module_unstable_input_idxs",
+                setter_for_module_unstable_input_idxs, "",
+                "Comma-separated list of custom call targets with legacy "
+                "registry API (non FFI API), whose targets supports lowering "
+                "to command buffer custom command, i.e, custom call target "
+                "supports cuda-graph capturing for CUDA devices."));
+  
+  flag_list->push_back(
+      tsl::Flag("module_unstable_input_idxs",
+                setter_for_module_unstable_output_idxs, "",
                 "Comma-separated list of custom call targets with legacy "
                 "registry API (non FFI API), whose targets supports lowering "
                 "to command buffer custom command, i.e, custom call target "

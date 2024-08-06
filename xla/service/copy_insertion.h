@@ -90,6 +90,8 @@ class CopyInsertion : public HloModulePass {
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads = {});
 
+  absl::Status AddCopyForVolatileInputOutput(HloModule* module);
+
  protected:
   // Override which requires the caller to pass in a call graph.
   virtual absl::Status AddSpecialCaseCopies(

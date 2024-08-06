@@ -47,6 +47,42 @@ void parse_xla_backend_extra_options(T* extra_options_map,
   }
 }
 
+void parse_idxs_map(
+    absl::flat_hash_map<int64_t, std::vector<int64_t>>* idxs_map,
+    std::string comma_separated_values) {
+  std::istringstream ss(comma_separated_values);
+  std::string pair;
+
+  while (std::getline(ss, pair, ',')) {
+    std::istringstream pairStream(pair);
+    std::string keyStr, valueStr;
+
+    if (std::getline(pairStream, keyStr, ':') &&
+        std::getline(pairStream, valueStr)) {
+      // Remove brackets from valueStr
+      valueStr.erase(std::remove(valueStr.begin(), valueStr.end(), '['),
+                     valueStr.end());
+      valueStr.erase(std::remove(valueStr.begin(), valueStr.end(), ']'),
+                     valueStr.end());
+
+      // Parse key
+      int key = std::stoi(keyStr);
+
+      // Parse values
+      std::vector<int> values;
+      std::istringstream valueStream(valueStr);
+      std::string value;
+      while (std::getline(valueStream, value, ',')) {
+        if (!value.empty()) {
+          values.push_back(std::stoi(value));
+        }
+      }
+
+      idxs_map[key] = values;
+    }
+  }
+}
+
 }  // namespace xla
 
 #endif  // XLA_DEBUG_OPTIONS_PARSERS_H_
