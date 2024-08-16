@@ -110,6 +110,7 @@ absl::StatusOr<std::unique_ptr<tsl::BFCAllocator>> CreateBFCAllocator(
     allocator_memory = gpu_system_memory_size.value();
   }
 
+  VLOG(3) << "BFCAllocator preallocate " << preallocate;
   if (preallocate) {
     LOG(INFO) << "XLA backend allocating " << allocator_memory
               << " bytes on device " << device_ordinal << " for BFCAllocator.";

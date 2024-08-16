@@ -56,9 +56,10 @@ CommandBufferThunk::ExecutorCommandBuffer::ExecutorCommandBuffer(
 
 CommandBufferThunk::CommandBufferThunk(CommandBufferCmdSequence commands,
                                        ThunkInfo thunk_info,
-                                       std::unique_ptr<SequentialThunk> thunks)
+                                       std::unique_ptr<SequentialThunk> thunks, bool stable_ptr)
     : Thunk(Thunk::kCommandBuffer, std::move(thunk_info)),
       commands_(std::move(commands)),
+      stable_ptr_(stable_ptr),
       thunks_(std::move(thunks)),
       state_(std::make_shared<State>()) {
   // When we create a new command buffer thunk (which happens when we
@@ -79,13 +80,18 @@ CommandBufferThunk::CommandBufferThunk(CommandBufferCmdSequence commands,
 
 bool CommandBufferThunk::ExecutorCommandBuffer::ShouldUpdateCommandBuffer(
     const CommandBufferCmdSequence& commands,
-    const Thunk::ExecuteParams& params) {
+    const Thunk::ExecuteParams& params, bool stable_ptr) {
+  const BufferAllocations* allocs = params.buffer_allocations;
+  if (recorded_allocs.size() == allocs->size() && stable_ptr) {
+    VLOG(3) << "SKip update due to stable memory pointers";
+    return false;
+  }
+
   if (commands.force_update()) {
     return true;
   }
 
   bool should_update = false;
-  const BufferAllocations* allocs = params.buffer_allocations;
 
   // We check only allocations referenced by commands in a cmd sequence, and
   // leave every other entry default initialized (nullptr device memory).
@@ -162,7 +168,8 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
   // update on each call.
   if (cmd_buffer->command_buffer->state() ==
           se::CommandBuffer::State::kCreate &&
-      cmd_buffer->ShouldUpdateCommandBuffer(commands_, execute_params)) {
+      cmd_buffer->ShouldUpdateCommandBuffer(commands_, execute_params,
+                                            stable_ptr_)) {
     VLOG(3) << "Initialize command buffer on device #"
             << params.executor->device_ordinal()
             << " by recoding command buffer cmd sequence"
@@ -212,7 +219,7 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 
   absl::MutexLock lock(&cmd_buffer->mutex);
 
-  if (cmd_buffer->ShouldUpdateCommandBuffer(commands_, params)) {
+  if (cmd_buffer->ShouldUpdateCommandBuffer(commands_, params, stable_ptr_)) {
     VLOG(3) << "Update command buffer on device #" << executor->device_ordinal()
             << " by recoding command buffer cmd sequence" << " after "
             << cmd_buffer->num_executions << " executions since last update"

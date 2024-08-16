@@ -74,6 +74,8 @@ class CommandBufferScheduling : public HloModulePass {
     // remove that flag and enable all supported commands by default.
     absl::flat_hash_set<DebugOptions::CommandBufferCmdType> enabled_commands;
     absl::flat_hash_set<std::string> enabled_legacy_custom_call_targets;
+    std::optional<absl::flat_hash_set<int64_t>> volatile_input_idxs; 
+    std::optional<absl::flat_hash_set<int64_t>> volatile_output_idxs; 
     const se::DeviceDescription& device_description;
   };
 

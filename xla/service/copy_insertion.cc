@@ -2321,47 +2321,52 @@ absl::Status CopyInsertion::RemoveUnnecessaryCopies(
 }
 
 absl::Status AddCopyForVolatileInputOutput(HloModule* module) {
-  std::vector<int64_t> input_volatile_params;
   HloComputation* entry_computation = module->entry_computation();
-  for (auto i : input_volatile) {
-    HloInstruction* param = entry_computation->parameter_instruction(i);
 
-    std::vector<HloInstruction*> users = param->users();
-    TF_ASSIGN_OR_RETURN(
-        HloInstruction * deep_copy,
-        param->parent()->DeepCopyInstruction(instruction, nullptr, nullptr));
-    for (HloInstruction* user : users) {
-      TF_RETURN_IF_ERROR(param->ReplaceUseWith(user, deep_copy));
-    }
-    if (param == param->parent()->root_instruction()) {
-      param->parent()->set_root_instruction(deep_copy);
+  const DebugOptions& debug_options = module->config().debug_options();
+  const auto& module_unstable_input_idxs =
+      debug_options.module_unstable_input_idxs();
+  const auto& module_unstable_output_idxs =
+      debug_options.module_unstable_output_idxs();
+
+  auto it0 = module_unstable_input_idxs.find(module->unique_id());
+  if (it0 != module_unstable_input_idxs.end()) {
+    const auto& idx_list = it0->second;
+    for (auto i : idx_list.vals()) {
+      HloInstruction* param = entry_computation->parameter_instruction(i);
+      std::vector<HloInstruction*> users = param->users();
+      TF_ASSIGN_OR_RETURN(
+          HloInstruction * deep_copy,
+          param->parent()->DeepCopyInstruction(param, nullptr, nullptr));
+      for (HloInstruction* user : users) {
+        TF_RETURN_IF_ERROR(param->ReplaceUseWith(user, deep_copy));
+      }
+      if (param == param->parent()->root_instruction()) {
+        param->parent()->set_root_instruction(deep_copy);
+      }
     }
   }
 
-  bool copy_for_volatitle_output = false;
-  if (copy_for_volatitle_output) {
+  auto it1 = module_unstable_output_idxs.find(module->unique_id());
+  if (it1 != module_unstable_output_idxs.end()) {
+    const auto& idx_list = it1->second;
     const Shape& root_shape = entry_computation->root_instruction()->shape();
-    const ShapeTree<bool>& indices_to_copy(root_shape, false);
-    if (root_shape.IsTuple()) {
-      for (auto i : root_shape.tuple_shape_size()) {
-        if (std::find(output_volatile.begin(), output_volatile.end(), i) !=
-            output_volatitle.end()) {
-          indices_to_copy.element({i}) = true;
-        }
+    ShapeTree<bool> indices_to_copy(root_shape, false);
+    if (idx_list.vals().size() > 0) {
+      for (auto i : idx_list.vals()) {
+        *indices_to_copy.mutable_element({i}) = true;
       }
     } else {
-      TF_RET_CHECK(output_volatitle.size() == 0);
-      indices_to_copy.element({}) = true;
+      *indices_to_copy.mutable_element({}) = true;
     }
-
     ShapeTree<HloInstruction*> copies_added(root_shape);
     TF_ASSIGN_OR_RETURN(HloInstruction * deep_copy,
                         entry_computation->DeepCopyInstruction(
                             entry_computation->root_instruction(),
-                            indices_to_copy, &copies_added));
-
+                            &indices_to_copy, &copies_added));
     entry_computation->set_root_instruction(deep_copy);
   }
+
   return absl::OkStatus();
 }
 

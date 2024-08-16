@@ -836,6 +836,8 @@ message DebugOptions {
   // which is good for cuda-graph perf.
   bool xla_gpu_temp_buffer_use_separate_color = 312;
 
+  bool xla_enable_stable_io_buffer = 319;
+
   // Custom call targets with legacy registry API (non FFI API),
   // that support recording to command buffer custom command,
   // i.e, custom call target supports cuda-graph capturing for CUDA devices.
@@ -873,10 +875,13 @@ message DebugOptions {
   // Relative precision for comparing different GEMM solutions
   float xla_gpu_autotune_gemm_rtol = 316;
 
-  map<Int64, Int64List> module_unstable_input_idxs = 317;
-  map<Int64, Int64List> module_unstable_output_idxs = 318;
+  message int64List {
+    repeated int64 vals = 1;
+  }
+  map<int64, int64List> module_unstable_input_idxs = 317;
+  map<int64, int64List> module_unstable_output_idxs = 318;
 
-  // Next id: 319
+  // Next id: 320
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

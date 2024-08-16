@@ -213,6 +213,33 @@ static bool IsCommand(const HloInstruction* hlo,
   return false;
 }
 
+static bool IsStableOp(const HloInstruction* inst,
+                       const CommandBufferConfig& config) {
+  if (config.volatile_input_idxs.has_value()) {
+    for (auto operand : inst->operands()) {
+      if (const auto* param = Cast<HloParameterInstruction>(operand)) {
+        if (config.volatile_input_idxs.value().contains(
+                param->parameter_number())) {
+          return false;
+        }
+      }
+    }
+  }
+
+  if (config.volatile_output_idxs.has_value()) {
+    const auto& idx_set = config.volatile_output_idxs.value();
+    for (auto user : inst->users()) {
+      if (user ==
+          inst->parent()->parent()->entry_computation()->root_instruction()) {
+        if (idx_set.empty() || idx_set.contains(user->operand_index(inst))) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Asynchronous HLO operations mapped to commands.
 //===----------------------------------------------------------------------===//
@@ -324,11 +351,11 @@ CommandBufferScheduling::CollectCommandBufferSequences(
 
   auto& instructions = schedule.instructions();
 
-  // Collect the sequence of instructions that contains the async start and its
-  // corresponding done instruction. If there is another start instruction
-  // between the original start and done, we may potentially extend the sequence
-  // to include its corresponding done instruction. For example, if we call this
-  // function on async-start_a in the following sequence:
+  // Collect the sequence of instructions that contains the async start and
+  // its corresponding done instruction. If there is another start instruction
+  // between the original start and done, we may potentially extend the
+  // sequence to include its corresponding done instruction. For example, if
+  // we call this function on async-start_a in the following sequence:
   //
   // async_start_a
   // async_start_b
@@ -356,8 +383,8 @@ CommandBufferScheduling::CollectCommandBufferSequences(
     return seq;
   };
 
-  // Check that instructions are safe to be captured by command buffer, and that
-  // we do not capture unmatched async done instruction.
+  // Check that instructions are safe to be captured by command buffer, and
+  // that we do not capture unmatched async done instruction.
   auto check_async_region = [&](const HloInstructionSequence& seq) {
     if (!absl::c_all_of(seq.instructions(), [&](HloInstruction* inst) {
           return IsNoOp(inst) || IsCommand(inst, config) ||
@@ -384,17 +411,17 @@ CommandBufferScheduling::CollectCommandBufferSequences(
   for (size_t i = 0; i < instructions.size(); i++) {
     HloInstruction* inst = instructions.at(i);
 
-    // We add no-op instructions to current sequence only if they act as a glue
-    // between commands. We do not create command sequences consisting only from
-    // no-op instruction. First and last instruction in the command buffer is
-    // always a load-bearing command.
+    // We add no-op instructions to current sequence only if they act as a
+    // glue between commands. We do not create command sequences consisting
+    // only from no-op instruction. First and last instruction in the command
+    // buffer is always a load-bearing command.
     if (IsNoOp(inst) && num_commands_in_current_seq) {
       current_seq.push_back(inst);
       continue;
     }
 
     // Synchronous commands always can be added to instruction sequence.
-    if (IsCommand(inst, config)) {
+    if (IsCommand(inst, config) && IsStableOp(inst, config)) {
       num_commands_in_current_seq++;
       current_seq.push_back(inst);
       continue;
@@ -424,10 +451,10 @@ CommandBufferScheduling::CollectCommandBufferSequences(
   return sequences;
 }
 
-// This function moves kParameter and kConstant instructions in a computation to
-// the beginning of the computation. This simplifies the construction of command
-// buffer computations because we don't need to deal with parameters and
-// constants that have users outside of a command buffer.
+// This function moves kParameter and kConstant instructions in a computation
+// to the beginning of the computation. This simplifies the construction of
+// command buffer computations because we don't need to deal with parameters
+// and constants that have users outside of a command buffer.
 absl::Status CommandBufferScheduling::MoveParametersAndConstantsToFront(
     HloComputation* computation) {
   HloInstructionSequence new_sequence;
@@ -439,9 +466,9 @@ absl::Status CommandBufferScheduling::MoveParametersAndConstantsToFront(
       new_sequence.push_back(inst);
 
       // Because we move instruction to the front of the computation we can't
-      // have any control predecessors, however silently dropping them is unsafe
-      // as we can have transitive dependencies that define schedule order, so
-      // we forward control predecessors to all users.
+      // have any control predecessors, however silently dropping them is
+      // unsafe as we can have transitive dependencies that define schedule
+      // order, so we forward control predecessors to all users.
       for (HloInstruction* control_predecessor : inst->control_predecessors()) {
         for (HloInstruction* user : inst->users()) {
           TF_RETURN_IF_ERROR(control_predecessor->AddControlDependencyTo(user));
@@ -476,9 +503,9 @@ absl::StatusOr<CommandBuffer> CommandBufferScheduling::PrepareCommandBuffer(
   absl::flat_hash_set<HloInstruction*> in_command_buffer(instructions.begin(),
                                                          instructions.end());
 
-  // The sequence might use results of instructions that are not captured by the
-  // sequence. We pass those results as parameters and map the producers of the
-  // results to their corresponding parameter instructions.
+  // The sequence might use results of instructions that are not captured by
+  // the sequence. We pass those results as parameters and map the producers
+  // of the results to their corresponding parameter instructions.
   absl::flat_hash_map<HloInstruction*, HloParameterInstruction*> parameters;
 
   // Mapping from command buffer instructions to their clones in the command
@@ -486,8 +513,8 @@ absl::StatusOr<CommandBuffer> CommandBufferScheduling::PrepareCommandBuffer(
   absl::flat_hash_map<HloInstruction*, HloInstruction*> inst_mapping;
 
   // Maps HLO instructions in the original computation to instructions in the
-  // command buffer: (a) a parameter corresponding to captured value (b) cloned
-  // instruction corresponding to a command.
+  // command buffer: (a) a parameter corresponding to captured value (b)
+  // cloned instruction corresponding to a command.
   auto mapped_operands = [&](HloInstruction* instr) {
     absl::InlinedVector<HloInstruction*, 4> operands;
     for (HloInstruction* operand : instr->operands()) {
@@ -589,9 +616,9 @@ absl::StatusOr<HloComputation*> CommandBufferScheduling::RewriteCommandBuffer(
   if (command_buffer.results.empty())
     return absl::InternalError("command buffer results must not be empty");
 
-  // If we have more than one result we return them as tuple, and get individual
-  // values using `get-tuple-element` instructions. Otherwise we simply return
-  // a result from a command buffer computation.
+  // If we have more than one result we return them as tuple, and get
+  // individual values using `get-tuple-element` instructions. Otherwise we
+  // simply return a result from a command buffer computation.
   Shape cmd_buffer_result_shape;
   bool has_single_result = command_buffer.results.size() == 1;
 
@@ -625,9 +652,9 @@ absl::StatusOr<HloComputation*> CommandBufferScheduling::RewriteCommandBuffer(
   // As we are running after scheduling we have to keep it valid.
   HloSchedule& schedule = parent->parent()->schedule();
 
-  // Update schedule to replace the last instruction with a command buffer call.
-  // Removal of the rest of the instructions in the sequence is handled by
-  // schedule update below.
+  // Update schedule to replace the last instruction with a command buffer
+  // call. Removal of the rest of the instructions in the sequence is handled
+  // by schedule update below.
   HloInstructionSequence& sequence = schedule.GetOrCreateSequence(parent);
   sequence.replace_instruction(seq.instructions().back(), call);
 
@@ -683,8 +710,8 @@ absl::StatusOr<HloComputation*> CommandBufferScheduling::RewriteCommandBuffer(
     TF_RETURN_IF_ERROR(inst->DropAllControlDeps());
   }
 
-  // Traverse in reverse order as original sequence was topologically sorted and
-  // we can't remove instructions with users.
+  // Traverse in reverse order as original sequence was topologically sorted
+  // and we can't remove instructions with users.
   for (int32_t i = seq.instructions().size() - 1; i >= 0; i--) {
     TF_RETURN_IF_ERROR(parent->RemoveInstruction(seq.instructions()[i]));
   }
@@ -705,13 +732,39 @@ absl::StatusOr<bool> CommandBufferScheduling::Run(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   // We run command buffer scheduling after a regular scheduling to guarantee
-  // that command buffers will not change execution order and buffer assignment
-  // compared to a regular execution. Some operations (i.e. async collectives)
-  // can't be captured into command buffers, and forming too large command
-  // buffers too early can impact async operations scheduling.
+  // that command buffers will not change execution order and buffer
+  // assignment compared to a regular execution. Some operations (i.e. async
+  // collectives) can't be captured into command buffers, and forming too
+  // large command buffers too early can impact async operations scheduling.
   if (!module->has_schedule()) return Internal("module is not scheduled");
 
   const DebugOptions& debug_options = module->config().debug_options();
+
+  const auto& module_unstable_input_idxs =
+      debug_options.module_unstable_input_idxs();
+  auto it0 = module_unstable_input_idxs.find(module->unique_id());
+  std::optional<absl::flat_hash_set<int64_t>> input_idxs = std::nullopt;
+  if (it0 != module_unstable_input_idxs.end()) {
+    const auto& idx_list = it0->second;
+    absl::flat_hash_set<int64_t> idx_set;
+    for (auto idx : idx_list.vals()) {
+      idx_set.insert(idx);
+    }
+    input_idxs = std::move(idx_set);
+  }
+
+  const auto& module_unstable_output_idxs =
+      debug_options.module_unstable_output_idxs();
+  std::optional<absl::flat_hash_set<int64_t>> output_idxs = std::nullopt;
+  auto it1 = module_unstable_output_idxs.find(module->unique_id());
+  if (it1 != module_unstable_output_idxs.end()) {
+    const auto& idx_list = it1->second;
+    absl::flat_hash_set<int64_t> idx_set;
+    for (auto idx : idx_list.vals()) {
+      idx_set.insert(idx);
+    }
+    output_idxs = std::move(idx_set);
+  }
 
   absl::flat_hash_set<DebugOptions::CommandBufferCmdType> commands;
   for (auto cmd_type : debug_options.xla_gpu_enable_command_buffer()) {
@@ -724,9 +777,9 @@ absl::StatusOr<bool> CommandBufferScheduling::Run(
     legacy_custom_call_targets.insert(target);
   }
 
-  CommandBufferConfig config{std::move(commands),
-                             std::move(legacy_custom_call_targets),
-                             device_description_};
+  CommandBufferConfig config{
+      std::move(commands), std::move(legacy_custom_call_targets),
+      std::move(input_idxs), std::move(output_idxs), device_description_};
 
   // Erase command buffer cmd types that are not supported by the gpu runtime.
   static constexpr auto kRequireConditionals = {DebugOptions::CONDITIONALS};

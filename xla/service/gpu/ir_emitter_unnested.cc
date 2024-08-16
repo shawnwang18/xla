@@ -574,13 +574,26 @@ absl::Status IrEmitterUnnested::EmitCommandBufferThunk(
           ? CommandBufferCmdSequence::SynchronizationMode::kAutomatic
           : CommandBufferCmdSequence::SynchronizationMode::kSerialize;
 
+  const auto& module_unstable_input_idxs =
+      ir_emitter_context_->debug_options().module_unstable_input_idxs();
+  auto it0 =
+      module_unstable_input_idxs.find(instr->parent()->parent()->unique_id());
+
+  const auto& module_unstable_output_idxs =
+      ir_emitter_context_->debug_options().module_unstable_output_idxs();
+  auto it1 =
+      module_unstable_output_idxs.find(instr->parent()->parent()->unique_id());
+
+  bool stable_ptr = (it0 != module_unstable_input_idxs.end()) ||
+                    (it1 != module_unstable_output_idxs.end());
+
   TF_ASSIGN_OR_RETURN(
       CommandBufferCmdSequence cmd_sequence,
       ConvertToCommands(thunk_sequence->thunks(), synchronization_mode));
 
   AddThunkToThunkSequence(std::make_unique<CommandBufferThunk>(
       std::move(cmd_sequence), Thunk::ThunkInfo::WithProfileAnnotation(instr),
-      std::move(thunk_sequence)));
+      std::move(thunk_sequence), stable_ptr));
 
   return absl::OkStatus();
 }

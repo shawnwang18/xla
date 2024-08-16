@@ -38,7 +38,8 @@ namespace xla::gpu {
 class CommandBufferThunk : public Thunk {
  public:
   CommandBufferThunk(CommandBufferCmdSequence commands, ThunkInfo thunk_info,
-                     std::unique_ptr<SequentialThunk> thunks = nullptr);
+                     std::unique_ptr<SequentialThunk> thunks = nullptr,
+                     bool stable_ptr = false);
 
   const std::unique_ptr<SequentialThunk>& thunks() const { return thunks_; }
 
@@ -63,7 +64,7 @@ class CommandBufferThunk : public Thunk {
     // Returns true if `commands` cmd sequence has to be recorded into
     // `command_buffer` to update it (see `recorded_allocs` below).
     bool ShouldUpdateCommandBuffer(const CommandBufferCmdSequence& commands,
-                                   const Thunk::ExecuteParams& params)
+                                   const Thunk::ExecuteParams& params, bool stable_ptr)
         ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex);
 
     // se::CommandBuffer is not thread safe, and we guard it with a mutex to
@@ -122,6 +123,8 @@ class CommandBufferThunk : public Thunk {
 
   // Command sequence that initializes command buffers on each executor.
   CommandBufferCmdSequence commands_;
+
+  bool stable_ptr_;
 
   // Thunk sequence that executes the same commands as in `commands_` but using
   // thunk mechanism. We use it as a fallback mechanism to work around CUPTI
