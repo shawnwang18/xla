@@ -965,17 +965,17 @@ absl::Status GpuCommandBuffer::Finalize() {
 
   // TODO(b/362769658): Remove this workaround when cuda supports conditionals
   // with empty graphs.
-#if !defined(TENSORFLOW_USE_ROCM)
-  if (num_nodes == 0) {
-    GpuGraphNodeHandle empty_node_handle = nullptr;
-    TF_ASSIGN_OR_RETURN(NoOpKernel * noop, GetNoOpKernel());
-
-    TF_RETURN_IF_ERROR(GpuDriver::GraphAddKernelNode(
-        &empty_node_handle, graph_, /*deps=*/{}, "noop",
-        AsGpuKernel(&**noop)->gpu_function(), 1, 1, 1, 1, 1, 1, 0,
-        /*kernel_params=*/nullptr, /*extra=*/nullptr));
-  }
-#endif
+//#if !defined(TENSORFLOW_USE_ROCM)
+//  if (num_nodes == 0) {
+//    GpuGraphNodeHandle empty_node_handle = nullptr;
+//    TF_ASSIGN_OR_RETURN(NoOpKernel * noop, GetNoOpKernel());
+//
+//    TF_RETURN_IF_ERROR(GpuDriver::GraphAddKernelNode(
+//        &empty_node_handle, graph_, /*deps=*/{}, "noop",
+//        AsGpuKernel(&**noop)->gpu_function(), 1, 1, 1, 1, 1, 1, 0,
+//        /*kernel_params=*/nullptr, /*extra=*/nullptr));
+//  }
+//#endif
 
   // Maybe dump created CUDA graph to a dot file for debugging.
   if (state_ == State::kCreate && VLOG_IS_ON(10)) {
