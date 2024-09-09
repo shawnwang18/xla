@@ -161,7 +161,6 @@ class GpuCommandBuffer : public CommandBuffer {
   // we have a higher risk of OOM errors.
   static int64_t AliveExecs();
 
- private:
   using Dependencies = absl::InlinedVector<GpuGraphNodeHandle, 1>;
 
   using NoOpKernel = TypedKernel<>;
@@ -286,6 +285,9 @@ class GpuCommandBuffer : public CommandBuffer {
   // Collects a set of dependencies for a new barrier.
   Dependencies GetBarrierDependencies(ExecutionScopeId execution_scope_id);
 
+  // Launches a Noop kernel on the graph.
+  absl::Status LaunchNoopKernel();
+
   static_assert(std::is_pointer_v<GpuGraphHandle>,
                 "GpuGraphHandle must be a pointer");
   static_assert(std::is_pointer_v<GpuGraphExecHandle>,
@@ -352,20 +354,6 @@ class GpuCommandBuffer : public CommandBuffer {
   SetWhileConditionKernel set_while_condition_kernel_;
   NoOpKernel noop_kernel_;
 };
-
-//===----------------------------------------------------------------------===//
-// Implementation details device kernels required by GpuCommandBuffer.
-//===----------------------------------------------------------------------===//
-
-// See `cuda_conditional_kernels.cc` for CUDA implementation. These are
-// various kernels that update Gpu conditionals based on the device memory
-// values, and allow implementing on-device control flow via conditional command
-// buffers.
-std::string_view GetSetIfConditionKernel();
-std::string_view GetSetIfElseConditionKernel();
-std::string_view GetSetCaseConditionKernel();
-std::string_view GetSetForConditionKernel();
-std::string_view GetSetWhileConditionKernel();
 
 }  // namespace stream_executor::gpu
 

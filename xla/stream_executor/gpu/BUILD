@@ -170,6 +170,7 @@ gpu_only_cc_library(
         "//tensorflow/core/util/autotune_maps:__subpackages__",
     ]),
     deps = [
+        ":context",
         ":gpu_types_header",
         "//xla/stream_executor",
         "@com_google_absl//absl/status",
@@ -198,11 +199,6 @@ gpu_only_cc_library(
 )
 
 gpu_only_cc_library(
-    name = "gpu_kernels",
-    hdrs = ["gpu_kernels.h"],
-)
-
-gpu_only_cc_library(
     name = "gpu_command_buffer",
     srcs = ["gpu_command_buffer.cc"],
     hdrs = ["gpu_command_buffer.h"],
@@ -213,7 +209,6 @@ gpu_only_cc_library(
         ":gpu_driver_header",
         ":gpu_executor_header",
         ":gpu_kernel_header",
-        ":gpu_kernels",
         ":gpu_stream",
         ":gpu_types_header",
         "//xla/stream_executor",
@@ -239,9 +234,9 @@ gpu_only_cc_library(
         "@tsl//tsl/platform:statusor",
     ] + if_cuda_is_configured([
         "@local_config_cuda//cuda:cuda_headers",
-        "//xla/stream_executor/cuda:cuda_conditional_kernels",
+        "//xla/stream_executor/cuda:command_buffer_kernels",
     ]) + if_rocm_is_configured([
-        "//xla/stream_executor/rocm:hip_conditional_kernels",
+        "//xla/stream_executor/rocm:command_buffer_kernels",
     ]),
 )
 
@@ -249,6 +244,7 @@ gpu_only_cc_library(
     name = "gpu_event_header",
     hdrs = ["gpu_event.h"],
     deps = [
+        ":context",
         ":gpu_types_header",
         "//xla/stream_executor:event",
         "@com_google_absl//absl/status",
@@ -260,8 +256,8 @@ gpu_only_cc_library(
     srcs = ["gpu_event.cc"],
     hdrs = ["gpu_event.h"],
     deps = [
+        ":context",
         ":gpu_driver_header",
-        ":gpu_executor_header",
         ":gpu_types_header",
         "//xla/stream_executor:event",
         "@com_google_absl//absl/base",
@@ -273,6 +269,7 @@ gpu_only_cc_library(
     name = "gpu_executor_header",
     hdrs = ["gpu_executor.h"],
     deps = [
+        ":context",
         ":gpu_collectives_header",
         ":gpu_driver_header",
         ":gpu_types_header",
@@ -357,7 +354,7 @@ gpu_only_cc_library(
     name = "gpu_kernel_header",
     hdrs = ["gpu_kernel.h"],
     deps = [
-        ":gpu_driver_header",
+        ":context",
         ":gpu_executor_header",
         ":gpu_types_header",
         "//xla/stream_executor",
@@ -439,6 +436,7 @@ gpu_only_cc_library(
         "gpu_timer.h",
     ],
     deps = [
+        ":context",
         ":gpu_driver_header",
         ":gpu_event",
         ":gpu_semaphore",

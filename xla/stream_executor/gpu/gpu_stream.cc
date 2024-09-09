@@ -61,10 +61,9 @@ absl::Status GpuStream::Init() {
     return GpuDriver::GetGpuStreamPriority(
         parent_->gpu_context(), std::get<StreamPriority>(stream_priority_));
   }();
-  if (!GpuDriver::CreateStream(parent_->gpu_context(), &gpu_stream_,
-                               priority)) {
-    return absl::InternalError("Failed to CreateStream");
-  }
+  TF_ASSIGN_OR_RETURN(
+      gpu_stream_, GpuDriver::CreateStream(parent_->gpu_context(), priority));
+
   return absl::OkStatus();
 }
 
@@ -98,26 +97,18 @@ absl::Status GpuStream::MemZero(DeviceMemoryBase* location, uint64_t size) {
 
 absl::Status GpuStream::Memcpy(DeviceMemoryBase* gpu_dst,
                                const DeviceMemoryBase& gpu_src, uint64_t size) {
-  if (GpuDriver::AsynchronousMemcpyD2D(
-          parent_->gpu_context(),
-          reinterpret_cast<GpuDevicePtr>(const_cast<void*>(gpu_dst->opaque())),
-          reinterpret_cast<GpuDevicePtr>(const_cast<void*>(gpu_src.opaque())),
-          size, gpu_stream())) {
-    return absl::OkStatus();
-  }
-
-  return absl::InternalError("Failed to memcpy from device to device.");
+  return GpuDriver::AsynchronousMemcpyD2D(
+      parent_->gpu_context(),
+      reinterpret_cast<GpuDevicePtr>(const_cast<void*>(gpu_dst->opaque())),
+      reinterpret_cast<GpuDevicePtr>(const_cast<void*>(gpu_src.opaque())), size,
+      gpu_stream());
 }
 
 absl::Status GpuStream::Memcpy(DeviceMemoryBase* gpu_dst, const void* host_src,
                                uint64_t size) {
-  bool ok = GpuDriver::AsynchronousMemcpyH2D(
+  return GpuDriver::AsynchronousMemcpyH2D(
       parent_->gpu_context(), reinterpret_cast<GpuDevicePtr>(gpu_dst->opaque()),
       host_src, size, gpu_stream());
-  if (!ok) {
-    return absl::InternalError("Failed to memcpy from device to host.");
-  }
-  return absl::OkStatus();
 }
 
 absl::Status GpuStream::Memcpy(void* host_dst, const DeviceMemoryBase& gpu_src,
@@ -186,7 +177,7 @@ GpuStream::~GpuStream() {
   }
 
   completed_event_.reset();
-  GpuDriver::DestroyStream(parent_->gpu_context(), &gpu_stream_);
+  GpuDriver::DestroyStream(parent_->gpu_context(), gpu_stream_);
 }
 
 void GpuStream::set_name(absl::string_view name) {
