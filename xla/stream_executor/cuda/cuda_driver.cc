@@ -676,6 +676,15 @@ absl::Status GpuDriver::GraphAddKernelNode(
       "Failed to add kernel node to a CUDA graph");
 }
 
+absl::StatusOr<size_t> GpuDriver::GraphGetNodeCount(CUgraph graph) {
+  VLOG(2) << "Get node count in graph " << graph;
+  size_t numNodes;
+  TF_RETURN_IF_ERROR(cuda::ToStatus(cuGraphGetNodes(graph, nullptr, &numNodes),
+                                    "Failed to get HIP graph node count"));
+
+  return numNodes;
+}
+
 /*static*/ absl::Status GpuDriver::GraphExecKernelNodeSetParams(
     CUgraphExec exec, CUgraphNode node, absl::string_view kernel_name,
     CUfunction function, unsigned int grid_dim_x, unsigned int grid_dim_y,
