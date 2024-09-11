@@ -971,6 +971,7 @@ absl::Status GpuCommandBuffer::Finalize() {
   // with empty graphs.
 #if !defined(TENSORFLOW_USE_ROCM)
   if (num_nodes == 0) {
+    VLOG(2) << "Empty command buffer insert Noop Kernel";
     TF_RETURN_IF_ERROR(LaunchNoopKernel());
   }
 #endif
