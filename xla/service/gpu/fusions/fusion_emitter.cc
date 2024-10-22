@@ -312,6 +312,9 @@ absl::StatusOr<FusionEmissionResult> KernelFusionEmitterBase::Emit(
   llvm::IRBuilder<> builder(ir_emitter_context.llvm_module()->getContext());
   std::string suggested_kernel_name = std::string(fusion.name());
 
+  VLOG(5) << "Emitting instruction: " << fusion.ToString();
+  VLOG(5) << "Fused computation: " << fusion.fused_instructions_computation()->ToString();
+
   TF_ASSIGN_OR_RETURN(
       KernelArguments kernel_arguments,
       KernelArguments::Create(ir_emitter_context.buffer_assignment(), &fusion));
