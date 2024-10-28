@@ -2276,7 +2276,7 @@ BufferAssigner::CreateAssignment(
     private_stack_colors.insert(color);
   }
 
-  assignment->CombineTempAllocations(private_stack_colors, temp_buffer_color);
+  // assignment->CombineTempAllocations(private_stack_colors, temp_buffer_color);
 
   XLA_VLOG_LINES(2, assignment->ToString());
   TF_RETURN_IF_ERROR(assignment->ComputeSummaryStats());
