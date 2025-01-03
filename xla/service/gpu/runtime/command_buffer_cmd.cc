@@ -206,15 +206,15 @@ void CommandBufferCmdSequence::Append(std::unique_ptr<CommandBufferCmd> cmd) {
   // If current command is a collective command, add a dependency to the
   // last previous collective command if there any. This is to avoid concurrent
   // collective operators which are very easy to get deadlock.
-  if (cmd->IsCollective()) {
-    for (auto it = commands_.rbegin(); it != commands_.rend(); ++it) {
-      if ((*it)->IsBarrier()) break;
-      if ((*it)->IsCollective()) {
-        cmd->add_dependency((*it)->index());
-        break;
-      }
-    }
-  }
+  // if (cmd->IsCollective()) {
+  //   for (auto it = commands_.rbegin(); it != commands_.rend(); ++it) {
+  //     if ((*it)->IsBarrier()) break;
+  //     if ((*it)->IsCollective()) {
+  //       cmd->add_dependency((*it)->index());
+  //       break;
+  //     }
+  //   }
+  // }
 
   bool requires_barrier = false;
   // Always add barriers between commands if we want to serialize execution.
