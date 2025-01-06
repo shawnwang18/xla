@@ -940,7 +940,7 @@ class EmptyCmd : public CommandBufferCmd {
 // CollectiveCmd
 //===----------------------------------------------------------------------===//
 
-class CollectiveCmd : public CommandBufferCmd {
+class CollectiveCmd : public TracedCommandBufferCmd {
  public:
   CollectiveCmd(CommandBufferCmdType cmd_type, NcclCollectiveConfig config);
 
@@ -950,11 +950,6 @@ class CollectiveCmd : public CommandBufferCmd {
   bool force_update() override { return true; }
 
   bool IsNestedCommandBuffer() const final { return true; }
-
-  absl::Status AddTracedCommandBuffer(
-      const Thunk::ExecuteParams& execute_params,
-      const RecordParams& record_params, se::CommandBuffer* command_buffer,
-      absl::FunctionRef<absl::Status(se::Stream*)> trace);
 
   virtual AsyncStreamKind GetAsyncStreamKind() = 0;
 

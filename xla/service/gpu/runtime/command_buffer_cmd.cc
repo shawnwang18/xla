@@ -66,6 +66,7 @@ limitations under the License.
 #include "xla/service/gpu/runtime/nccl_collective_thunk.h"
 #include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/gpu/stream_executor_util.h"
+#include "xla/service/gpu/gpu_memory_space_assignment.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
 #include "xla/stream_executor/command_buffer.h"
@@ -347,6 +348,18 @@ absl::StatusOr<se::CommandBuffer*> TracedCommandBuffer::GetOrTraceCommandBuffer(
     return entries_[0] = std::move(entry);
   };
 
+  bool all_allocations_from_temp_space =
+      absl::c_all_of(allocs, [&](const se::DeviceMemoryBase& addr) {
+        return addr.color() == kTempBufferMemorySpaceColor;
+      });
+  if (all_allocations_from_temp_space) {
+    // Temp space uses a separate memory allocator which will guarantee that
+    // allocations remains the same across iterations, so trace cache should
+    // either does not have the entry, or cache must hit.
+    CHECK(entries_[0].command_buffer == nullptr ||
+          absl::c_equal(entries_[0].recorded_allocs, allocs));
+  }
+
   for (size_t i = 0; i < capacity_; ++i) {
     // Found entry for a given allocations, move it to front and return a
     // pointer to cached command buffer.
@@ -393,6 +406,37 @@ absl::Status TracedCommandBufferCmd::AddTracedCommandBuffer(
     const Thunk::ExecuteParams& execute_params,
     const RecordParams& record_params, se::CommandBuffer* command_buffer,
     absl::FunctionRef<absl::Status(se::Stream*)> trace) {
+  // Collective command is forced to be retraced if the memory allocator does
+  // not guarantee allocations are persistent across iterations.
+  VLOG(2) << execute_params.buffer_allocations->ToString();
+  if (IsCollective()) {
+    if (execute_params.mock_collectives) {
+      // Treat mock collectives as a barrier with the same dependencies.
+      return command_buffer->EmptyOp(index(), dependencies());
+    }
+    bool all_allocations_from_temp_space =
+        absl::c_all_of(buffers(), [&](const BufferUse& buffer) {
+          auto addr = execute_params.buffer_allocations->GetDeviceAddress(
+              buffer.slice());
+          return addr.color() == kTempBufferMemorySpaceColor;
+        });
+
+    // If not all allocations for collective command are from temporal memory
+    // space, then we need to force re-tracing the command.
+    if (!all_allocations_from_temp_space) {
+      VLOG(3) << "NCCL command does not have persistent allocations, force "
+                 "retracing";
+      TF_ASSIGN_OR_RETURN(
+          std::unique_ptr<se::CommandBuffer> nested_cmd,
+          se::TraceCommandBufferFactory::Create(
+              execute_params.stream->parent(),
+              execute_params.command_buffer_trace_stream, trace));
+      return command_buffer->AddNestedCommandBuffer(index(), dependencies(),
+                                                    *nested_cmd);
+    }
+    VLOG(3) << "NCCL command operate on temp memory space, using trace cache";
+  }
+
   auto traced_cmd_buffer =
       record_params.state.GetOrCreate<TracedCommandBuffer>(this, [&] {
         const auto& debug_options = xla::GetDebugOptionsFromFlags();
@@ -1488,9 +1532,8 @@ EmptyCmd::BufferUseVector EmptyCmd::buffers() { return {}; }
 //===----------------------------------------------------------------------===//
 
 CollectiveCmd::CollectiveCmd(CommandBufferCmdType cmd_type,
-
                              NcclCollectiveConfig config)
-    : CommandBufferCmd(cmd_type), config_(std::move(config)) {}
+    : TracedCommandBufferCmd(cmd_type), config_(std::move(config)) {}
 
 absl::Status CollectiveCmd::Prepare(
     const Thunk::PrepareParams& params,
@@ -1507,22 +1550,6 @@ absl::Status CollectiveCmd::Prepare(
       GetNumLocalParticipants(*params.collective_params,
                               config().replica_groups, config().group_mode));
   return resource_requests.AddClique(clique_key, num_local_participants);
-}
-
-absl::Status CollectiveCmd::AddTracedCommandBuffer(
-    const Thunk::ExecuteParams& execute_params,
-    const RecordParams& record_params, se::CommandBuffer* command_buffer,
-    absl::FunctionRef<absl::Status(se::Stream*)> trace) {
-  if (execute_params.mock_collectives) {
-    // Treat mock collectives as a barrier with the same dependencies.
-    return command_buffer->EmptyOp(index(), dependencies());
-  }
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<se::CommandBuffer> nested_cmd,
-                      se::TraceCommandBufferFactory::Create(
-                          execute_params.stream->parent(),
-                          execute_params.command_buffer_trace_stream, trace));
-  return command_buffer->AddNestedCommandBuffer(index(), dependencies(),
-                                                *nested_cmd);
 }
 
 //===----------------------------------------------------------------------===//

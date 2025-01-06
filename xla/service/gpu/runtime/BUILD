@@ -87,6 +87,7 @@ cc_library(
         "//xla/service/gpu:matmul_utils",
         "//xla/service/gpu:stream_executor_util",
         "//xla/service/gpu/kernels:custom_kernel",
+        "//xla/service/gpu:gpu_memory_space_assignment",
         "//xla/stream_executor:command_buffer",
         "//xla/stream_executor:device_memory",
         "//xla/stream_executor:dnn",

@@ -76,8 +76,8 @@ class BufferAllocations {
     std::string out;
     for (BufferAllocation::Index i = 0; i < buffers_.size(); ++i) {
       const auto& buf = buffers_[i];
-      absl::StrAppendFormat(&out, "Buffer %d -> %p (%d B)", i, buf.opaque(),
-                            buf.size());
+      absl::StrAppendFormat(&out, "Buffer %d -> %p (%dB, %d)", i, buf.opaque(),
+                            buf.size(), buf.color());
     }
     return out;
   }

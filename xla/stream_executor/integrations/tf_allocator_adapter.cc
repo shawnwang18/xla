@@ -55,7 +55,8 @@ absl::StatusOr<OwningDeviceMemory> TfAllocatorAdapter::Allocate(
           "Out of memory while trying to allocate ", size, " bytes."));
     }
   }
-  return OwningDeviceMemory(DeviceMemoryBase(data, size), device_ordinal, this);
+  return OwningDeviceMemory(DeviceMemoryBase(data, size, memory_space),
+                            device_ordinal, this);
 }
 
 absl::Status TfAllocatorAdapter::Deallocate(int device_ordinal,

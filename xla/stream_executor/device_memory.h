@@ -47,17 +47,21 @@ namespace stream_executor {
 // Thread-compatible.
 class DeviceMemoryBase {
  public:
+  using Color = int64_t;
   // Default constructor instantiates a null-pointed, zero-sized device memory
   // region. An opaque pointer may be provided -- see header for details on the
   // opacity of that pointer.
   explicit DeviceMemoryBase(void *opaque = nullptr, uint64_t size = 0)
-      : opaque_(opaque), size_(size) {
+      : opaque_(opaque), size_(size), color_(0) {
     // TODO(b/336267585): This constructor dangerously encourages
     //                 DeviceMemoryBase(mem) which would imply
     //                 DeviceMemoryBase(mem, 0)
     //                 We should delete & resolve any dependencies.
     //  explicit DeviceMemoryBase(void *opaque) = delete;
   }
+
+  explicit DeviceMemoryBase(void *opaque, uint64_t size, Color color)
+      : opaque_(opaque), size_(size), color_(color) {}
 
   // Returns whether the backing memory is the null pointer.
   // A `== nullptr` convenience method is also provided.
@@ -86,6 +90,8 @@ class DeviceMemoryBase {
   void *opaque() { return opaque_; }
   const void *opaque() const { return opaque_; }
 
+  Color color() const { return color_; }
+
   // Returns the payload of this memory region.
   uint64_t payload() const { return payload_; }
 
@@ -108,7 +114,8 @@ class DeviceMemoryBase {
         << size_bytes << ") vs. (" << size_ << ")";
 
     return DeviceMemoryBase(
-        reinterpret_cast<std::byte *>(opaque_) + offset_bytes, size_bytes);
+        reinterpret_cast<std::byte *>(opaque_) + offset_bytes, size_bytes,
+        color_);
   }
 
  private:
@@ -120,6 +127,7 @@ class DeviceMemoryBase {
   // command buffer APIs).
   void *opaque_;
   uint64_t size_;         // Size in bytes of this allocation.
+  Color color_ = 0;       // Memory space of the allocation.
   uint64_t payload_ = 0;  // Payload data associated with this allocation.
 };
 
@@ -133,14 +141,14 @@ template <typename ElemT>
 class DeviceMemory final : public DeviceMemoryBase {
  public:
   // Default constructor instantiates a null-pointed, zero-sized memory region.
-  DeviceMemory() : DeviceMemoryBase(nullptr, 0) {}
+  DeviceMemory() : DeviceMemoryBase(nullptr, 0, 0) {}
   explicit DeviceMemory(std::nullptr_t) : DeviceMemory() {}
 
   // Typed device memory regions may be constructed from untyped device memory
   // regions, this effectively amounts to a cast from a void*.
   explicit DeviceMemory(const DeviceMemoryBase &other)
       : DeviceMemoryBase(const_cast<DeviceMemoryBase &>(other).opaque(),
-                         other.size()) {
+                         other.size(), other.color()) {
     SetPayload(other.payload());
   }
 
@@ -157,8 +165,9 @@ class DeviceMemory final : public DeviceMemoryBase {
   // Creates a typed area of DeviceMemory with a given opaque pointer and the
   // quantity of bytes in the allocation. This function is broken out to
   // distinguish bytes from an element count.
-  static DeviceMemory<ElemT> MakeFromByteSize(void *opaque, uint64_t bytes) {
-    return DeviceMemory<ElemT>(opaque, bytes);
+  static DeviceMemory<ElemT> MakeFromByteSize(void *opaque, uint64_t bytes,
+                                              Color color = 0) {
+    return DeviceMemory<ElemT>(opaque, bytes, color);
   }
 
   // Creates a memory region (slice) inside another allocated memory region.
@@ -176,7 +185,8 @@ class DeviceMemory final : public DeviceMemoryBase {
   //
   // In order to specify the desire to use byte size instead of element count
   // explicitly, use MakeFromByteSize.
-  DeviceMemory(void *opaque, uint64_t size) : DeviceMemoryBase(opaque, size) {}
+  DeviceMemory(void *opaque, uint64_t size, Color color)
+      : DeviceMemoryBase(opaque, size, color) {}
 };
 
 }  // namespace stream_executor
