@@ -789,5 +789,35 @@ TEST_F(HloTraversalTest, DoNotResolveIntoNestedFusions) {
               ElementsAre(InstructionAdaptorName("fusion.2")));
 }
 
+TEST_F(HloTraversalTest, DISABLED_CallRootTupleIsNotAUser) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(R"(
+    fusion {
+      a = f32[1024] parameter(0)
+      u = f32[1] constant(0)
+      i = s32[] constant(0)
+      dus = f32[1024] dynamic-update-slice(a, u, i)
+      t0 = tuple(dus)
+    }
+
+    command_buffer {
+      a = f32[1024] parameter(0)
+      cf = (f32[1024]) fusion(a), kind=kLoop, calls=fusion
+      t1 = tuple(cf)
+    }
+
+    entry {
+      a = f32[1024] parameter(0)
+      c = ((f32[1024])) call(a), to_apply=command_buffer
+      g = get-tuple-element(c), index=0
+    })"));
+
+  HloComputation& fusion = *module->GetComputationWithName("fusion");
+  EXPECT_THAT(HloInstructionAdaptor(*fusion.GetInstructionWithName("dus"),
+                                    &*HloFusionAdaptor::ForComputation(&fusion))
+                  .GetUsers(),
+              IsEmpty());
+}
+
 }  // namespace
 }  // namespace xla
