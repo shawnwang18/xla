@@ -249,8 +249,9 @@ absl::Status ExecuteThunksImpl(
     }
 
     // Borrow stream for tracing command buffers.
-    TF_ASSIGN_OR_RETURN(borrowed_command_buffer_trace_stream,
-                        run_options->BorrowStream(executor->device_ordinal()));
+    TF_ASSIGN_OR_RETURN(
+        borrowed_command_buffer_trace_stream,
+        run_options->BorrowStream(executor->device_ordinal(), stream_priority));
     command_buffer_trace_stream = borrowed_command_buffer_trace_stream.get();
   }
 

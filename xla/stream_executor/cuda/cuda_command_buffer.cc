@@ -125,6 +125,7 @@ absl::Status GraphInstantiate(CUgraphExec* exec, CUgraph graph) {
 
 #if CUDA_VERSION >= 12000
   uint64_t cu_flags = 0;
+  cu_flags = CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY;
   return cuda::ToStatus(cuGraphInstantiate(exec, graph, cu_flags),
                         "Failed to instantiate CUDA graph");
 #else
