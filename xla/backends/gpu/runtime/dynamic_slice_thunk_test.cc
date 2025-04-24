@@ -1724,7 +1724,8 @@ TEST_F(DynamicSliceThunkTest,
 
   Thunk::ExecuteParams params = Thunk::ExecuteParams::Create(
       run_options, /*buffer_allocations=*/allocations, stream.get(),
-      /*command_buffer_trace_stream=*/stream.get(),
+      /*command_buffer_trace_stream_default_priority=*/stream.get(),
+      /*command_buffer_trace_stream_highest_priority=*/stream.get(),
       /*collective_params=*/nullptr, /*collective_cliques=*/nullptr);
 
   Thunk::ExecutableSource source = {/*text=*/"", /*binary=*/{}};

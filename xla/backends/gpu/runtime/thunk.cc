@@ -169,35 +169,39 @@ Thunk::CollectiveExecuteParams::CollectiveExecuteParams(
 Thunk::ExecuteParams Thunk::ExecuteParams::Create(
     const ServiceExecutableRunOptions& run_options,
     const BufferAllocations& buffer_allocations, se::Stream* stream,
-    se::Stream* command_buffer_trace_stream,
+    se::Stream* command_buffer_trace_stream_default_priority,
+    se::Stream* command_buffer_trace_stream_highest_priority,
     CollectiveExecuteParams* collective_params,
     CollectiveCliques* collective_cliques,
     ExecutionStreamIdMap additional_compute_streams) {
-  return ExecuteParams(&buffer_allocations, stream, command_buffer_trace_stream,
-                       collective_params, collective_cliques,
-                       run_options.run_options().device_to_host_stream(),
-                       run_options.run_options().host_to_device_stream(),
-                       run_options.run_options().send_device_memory_function(),
-                       run_options.run_options().recv_device_memory_function(),
-                       run_options.run_options().ffi_execution_context(),
-                       additional_compute_streams,
-                       run_options.run_options().gpu_executable_run_options()
-                           ? run_options.run_options()
-                                 .gpu_executable_run_options()
-                                 ->enable_mock_collectives()
-                           : false,
-                       run_options.run_options().gpu_executable_run_options()
-                           ? run_options.run_options()
-                                 .gpu_executable_run_options()
-                                 ->requires_exclusive_lock_on_gpu()
-                           : false);
+  return ExecuteParams(
+      &buffer_allocations, stream, command_buffer_trace_stream_default_priority,
+      command_buffer_trace_stream_highest_priority, collective_params,
+      collective_cliques, run_options.run_options().device_to_host_stream(),
+      run_options.run_options().host_to_device_stream(),
+      run_options.run_options().send_device_memory_function(),
+      run_options.run_options().recv_device_memory_function(),
+      run_options.run_options().ffi_execution_context(),
+      additional_compute_streams,
+      run_options.run_options().gpu_executable_run_options()
+          ? run_options.run_options()
+                .gpu_executable_run_options()
+                ->enable_mock_collectives()
+          : false,
+      run_options.run_options().gpu_executable_run_options()
+          ? run_options.run_options()
+                .gpu_executable_run_options()
+                ->requires_exclusive_lock_on_gpu()
+          : false);
 }
 
 Thunk::ExecuteParams Thunk::ExecuteParams::CloneWithNewAllocations(
     const Thunk::ExecuteParams& params,
     const BufferAllocations& buffer_allocations) {
   return ExecuteParams(
-      &buffer_allocations, params.stream, params.command_buffer_trace_stream,
+      &buffer_allocations, params.stream,
+      params.command_buffer_trace_stream_default_priority,
+      params.command_buffer_trace_stream_highest_priority,
       params.collective_params, params.collective_cliques,
       params.device_to_host_stream, params.host_to_device_stream,
       params.send_device_memory_function, params.recv_device_memory_function,
@@ -206,7 +210,8 @@ Thunk::ExecuteParams Thunk::ExecuteParams::CloneWithNewAllocations(
 
 Thunk::ExecuteParams::ExecuteParams(
     const BufferAllocations* buffer_allocations, se::Stream* stream,
-    se::Stream* command_buffer_trace_stream,
+    se::Stream* command_buffer_trace_stream_default_priority,
+    se::Stream* command_buffer_trace_stream_highest_priority,
     CollectiveExecuteParams* collective_params,
     CollectiveCliques* collective_cliques, se::Stream* device_to_host_stream,
     se::Stream* host_to_device_stream,
@@ -217,7 +222,10 @@ Thunk::ExecuteParams::ExecuteParams(
     bool requires_exclusive_lock_on_gpu)
     : buffer_allocations(buffer_allocations),
       stream(stream),
-      command_buffer_trace_stream(command_buffer_trace_stream),
+      command_buffer_trace_stream_default_priority(
+          command_buffer_trace_stream_default_priority),
+      command_buffer_trace_stream_highest_priority(
+          command_buffer_trace_stream_highest_priority),
       collective_params(collective_params),
       collective_cliques(collective_cliques),
       device_to_host_stream(device_to_host_stream),

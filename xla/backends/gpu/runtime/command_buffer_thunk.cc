@@ -148,9 +148,10 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
   // for recording commands.
   Thunk::ExecuteParams execute_params(
       params.buffer_allocations, params.stream,
-      params.command_buffer_trace_stream, params.collective_params,
-      params.collective_cliques, /*device_to_host_stream=*/nullptr,
-      /*host_to_device_stream=*/nullptr,
+      params.command_buffer_trace_stream_default_priority,
+      params.command_buffer_trace_stream_highest_priority,
+      params.collective_params, params.collective_cliques,
+      /*device_to_host_stream=*/nullptr, /*host_to_device_stream=*/nullptr,
       /*send_device_memory_function=*/nullptr,
       /*recv_device_memory_function=*/nullptr, params.ffi_execution_context,
       /*additional_compute_streams=*/{}, /*mock_collectives=*/false,

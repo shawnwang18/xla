@@ -613,7 +613,7 @@ TracedCommandBufferCmd::RecordTracedCommand(
       auto nested_cmd,
       traced_cmd->GetOrTraceCommandBuffer(
           execute_params.buffer_allocations, execute_params.stream->parent(),
-          execute_params.command_buffer_trace_stream, trace));
+          execute_params.command_buffer_trace_stream_default_priority, trace));
 
   VLOG(5) << "Record traced command into command buffer: " << command_buffer;
   return Handle(
@@ -1366,7 +1366,7 @@ CustomCallCmd::RecordLegacyCustomCall(
       auto nested_cmd,
       se::TraceCommandBufferFactory::Create(
           execute_params.stream->parent(),
-          execute_params.command_buffer_trace_stream, [&](se::Stream* stream) {
+          execute_params.command_buffer_trace_stream_default_priority, [&](se::Stream* stream) {
             XlaCustomCallStatus custom_call_status;
             call_target_(stream, buffers.data(), opaque_.data(), opaque_.size(),
                          &custom_call_status);
@@ -1448,7 +1448,7 @@ CustomCallCmd::RecordXlaFfiCall(const Thunk::ExecuteParams& execute_params,
       auto nested_cmd,
       se::TraceCommandBufferFactory::Create(
           execute_params.stream->parent(),
-          execute_params.command_buffer_trace_stream, [&](se::Stream* stream) {
+          execute_params.command_buffer_trace_stream_default_priority, [&](se::Stream* stream) {
             ffi::CallOptions options = {
                 run_id, execute_params.buffer_allocations->device_ordinal(),
                 ffi::CallOptions::GpuOptions{
@@ -1511,10 +1511,18 @@ CollectiveCmd::RecordTracedCommand(
     const RecordParams& record_params, RecordAction record_action,
     se::CommandBuffer* command_buffer,
     absl::FunctionRef<absl::Status(se::Stream*)> trace) {
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<se::CommandBuffer> nested_cmd,
-                      se::TraceCommandBufferFactory::Create(
-                          execute_params.stream->parent(),
-                          execute_params.command_buffer_trace_stream, trace));
+  const auto& debug_options = xla::GetDebugOptionsFromFlags();
+  se::Stream* trace_stream;
+  if (debug_options.xla_gpu_enable_highest_priority_async_stream()) {
+    trace_stream = execute_params.command_buffer_trace_stream_highest_priority;
+  } else {
+    trace_stream = execute_params.command_buffer_trace_stream_default_priority;
+  }
+  CHECK(trace_stream != nullptr) << "Collective command trace stream is null";
+  TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<se::CommandBuffer> nested_cmd,
+      se::TraceCommandBufferFactory::Create(execute_params.stream->parent(),
+                                            trace_stream, trace));
 
   return Handle(
       std::move(record_action),

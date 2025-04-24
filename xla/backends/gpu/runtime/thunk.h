@@ -329,8 +329,12 @@ class Thunk {
     se::Stream* stream = nullptr;
 
     // Auxiliary stream for tracing command buffers. We use a separate stream to
-    // avoid accidental tracing of unrelated activities on a main stream.
-    se::Stream* command_buffer_trace_stream = nullptr;
+    // avoid accidental tracing of unrelated activities on a main stream. For
+    // async operator that uses highest priority stream, we also use a separate
+    // stream with highest priority for tracing in order maintain the highest
+    // priority of graph node got by tracing..
+    se::Stream* command_buffer_trace_stream_default_priority = nullptr;
+    se::Stream* command_buffer_trace_stream_highest_priority = nullptr;
 
     // Parameters for executing collective operations.
     CollectiveExecuteParams* collective_params = nullptr;
@@ -360,7 +364,8 @@ class Thunk {
     static ExecuteParams Create(
         const ServiceExecutableRunOptions& run_options,
         const BufferAllocations& buffer_allocations, se::Stream* stream,
-        se::Stream* command_buffer_trace_stream,
+        se::Stream* command_buffer_trace_stream_default_priority,
+        se::Stream* command_buffer_trace_stream_highest_priority,
         CollectiveExecuteParams* collective_params,
         CollectiveCliques* collective_cliques,
         ExecutionStreamIdMap additional_compute_streams = {});
@@ -378,7 +383,8 @@ class Thunk {
 
     // Auxiliary stream for tracing command buffers. We use a separate stream to
     // avoid accidental tracing of unrelated activities on a main stream.
-    se::Stream* command_buffer_trace_stream;
+    se::Stream* command_buffer_trace_stream_default_priority;
+    se::Stream* command_buffer_trace_stream_highest_priority;
 
     // Parameters for executing collective operations.
     CollectiveExecuteParams* collective_params;
@@ -408,7 +414,9 @@ class Thunk {
     friend class CommandBufferThunk;
 
     ExecuteParams(const BufferAllocations* buffer_allocations,
-                  se::Stream* stream, se::Stream* command_buffer_trace_stream,
+                  se::Stream* stream,
+                  se::Stream* command_buffer_trace_stream_default_priority,
+                  se::Stream* command_buffer_trace_stream_highest_priority,
                   CollectiveExecuteParams* collective_params,
                   CollectiveCliques* collective_cliques,
                   se::Stream* device_to_host_stream,

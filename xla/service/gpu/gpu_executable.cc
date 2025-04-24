@@ -236,7 +236,8 @@ absl::Status ExecuteThunksImpl(
   // Borrow streams required for CollectiveThunk.
   absl::InlinedVector<se::Stream*, kAsyncStreamTotal> async_comms_streams(
       kAsyncStreamTotal, nullptr);
-  se::Stream* command_buffer_trace_stream = nullptr;
+  se::Stream* command_buffer_trace_stream_default_priority = nullptr;
+  se::Stream* command_buffer_trace_stream_highest_priority = nullptr;
   std::vector<StreamPool::Ptr> async_comms_streams_ownr;
   StreamPool::Ptr borrowed_command_buffer_trace_stream;
   if (run_options->HasStreamBorrower()) {
@@ -249,10 +250,19 @@ absl::Status ExecuteThunksImpl(
     }
 
     // Borrow stream for tracing command buffers.
-    TF_ASSIGN_OR_RETURN(
-        borrowed_command_buffer_trace_stream,
-        run_options->BorrowStream(executor->device_ordinal(), stream_priority));
-    command_buffer_trace_stream = borrowed_command_buffer_trace_stream.get();
+    TF_ASSIGN_OR_RETURN(borrowed_command_buffer_trace_stream,
+                        run_options->BorrowStream(executor->device_ordinal()));
+    command_buffer_trace_stream_default_priority =
+        borrowed_command_buffer_trace_stream.get();
+
+    if (use_highest_priority_for_async_stream) {
+      TF_ASSIGN_OR_RETURN(
+          borrowed_command_buffer_trace_stream,
+          run_options->BorrowStream(executor->device_ordinal(),
+                                    stream_executor::StreamPriority::Highest));
+      command_buffer_trace_stream_highest_priority =
+          borrowed_command_buffer_trace_stream.get();
+    }
   }
 
   // Borrow stream for additional compute streams
@@ -318,7 +328,8 @@ absl::Status ExecuteThunksImpl(
         executable_source,
         &buffer_allocations,
         main_stream,
-        command_buffer_trace_stream,
+        command_buffer_trace_stream_default_priority,
+        command_buffer_trace_stream_highest_priority,
         &collective_params,
         &collective_cliques,
         run_options->run_options().ffi_execution_context(),
@@ -342,8 +353,9 @@ absl::Status ExecuteThunksImpl(
   // Prepare parameters for thunks execution.
   Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
       *run_options, buffer_allocations, main_stream,
-      command_buffer_trace_stream, &collective_params, &collective_cliques,
-      std::move(additional_execution_streams));
+      command_buffer_trace_stream_default_priority,
+      command_buffer_trace_stream_highest_priority, &collective_params,
+      &collective_cliques, std::move(additional_execution_streams));
 
   VLOG(1) << "[" << run_options->device_ordinal() << "] "
           << "Start GpuExecutable::ExecuteOnStream module: " << module_name;
