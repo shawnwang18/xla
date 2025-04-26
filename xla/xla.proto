@@ -647,6 +647,7 @@ message DebugOptions {
   // required for a region to be captured as a function to be launched as a GPU
   // graph.
   int32 xla_gpu_graph_min_graph_size = 208;
+  int32 xla_gpu_graph_max_graph_size = 389;
 
   string xla_gpu_kernel_cache_file = 306;
 
@@ -1218,7 +1219,7 @@ message DebugOptions {
   // Note: when adding a new flag, please add it to one of the hardware-specific
   // or hardware-agnostic sections at the top of this proto message.
 
-  // Next id: 389
+  // Next id: 390
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

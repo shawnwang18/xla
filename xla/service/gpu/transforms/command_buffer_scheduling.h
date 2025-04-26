@@ -94,7 +94,7 @@ class CommandBufferScheduling : public HloModulePass {
 
   static std::vector<HloInstructionSequence> CollectCommandBufferSequences(
       HloInstructionSequence schedule, const CommandBufferConfig& config,
-      int32_t min_num_commands = 1);
+      int32_t min_num_commands = 1, int32_t max_num_commands = 100);
 
   // Moves kParameter and kConstant instructions in a computation to
   // the beginning of the computation. This simplifies the construction of

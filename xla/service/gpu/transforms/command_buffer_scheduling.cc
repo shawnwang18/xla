@@ -444,7 +444,7 @@ static absl::StatusOr<bool> MoveGTEsRightAfterTupleDefinition(
 std::vector<HloInstructionSequence>
 CommandBufferScheduling::CollectCommandBufferSequences(
     const HloInstructionSequence schedule, const CommandBufferConfig& config,
-    int32_t min_num_commands) {
+    int32_t min_num_commands, int32_t max_num_commands) {
   std::vector<HloInstructionSequence> sequences;
 
   HloInstructionSequence current_seq;
@@ -561,6 +561,11 @@ CommandBufferScheduling::CollectCommandBufferSequences(
   };
 
   for (size_t i = 0; i < instructions.size(); i++) {
+
+    if (num_commands_in_current_seq >= max_num_commands) {
+      collect_current_seq();
+    }
+
     HloInstruction* inst = instructions.at(i);
 
     // We add no-op instructions to current sequence only if they act as a glue
@@ -977,7 +982,8 @@ absl::StatusOr<bool> CommandBufferScheduling::Run(
     std::vector<HloInstructionSequence> sequences =
         CollectCommandBufferSequences(
             module->schedule().sequence(comp), config,
-            debug_options.xla_gpu_graph_min_graph_size());
+            debug_options.xla_gpu_graph_min_graph_size(),
+            debug_options.xla_gpu_graph_max_graph_size());
 
     for (const HloInstructionSequence& seq : sequences) {
       TF_ASSIGN_OR_RETURN(CommandBuffer command_buffer,
