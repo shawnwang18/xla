@@ -1,0 +1,67 @@
+diff --git a/include/cudnn_frontend_shim.h b/include/cudnn_frontend_shim.h
+index 56745cae..fea2f676 100644
+--- a/include/cudnn_frontend_shim.h
++++ b/include/cudnn_frontend_shim.h
+@@ -36,6 +36,7 @@
+ #include <dlfcn.h>
+ #define HMODULE void *
+ #endif
++#include <functional>
+ #include <mutex>
+ #include <stdexcept>
+ #endif
+@@ -232,8 +233,17 @@ inline cudaError_t
+ cuda_graph_node_get_dependent_nodes(cudaGraphNode_t node,
+                                     cudaGraphNode_t *pDependentNodes,
+                                     size_t *pNumDependentNodes) {
++#if (CUDART_VERSION >= 13000)
++    NV_FE_CALL_TO_CUDA(std::function<cudaError_t(cudaGraphNode_t, cudaGraphNode_t *, cudaGraphEdgeData *, size_t *)>(),
++                       cudaGraphNodeGetDependentNodes,
++                       node,
++                       pDependentNodes,
++                       /*edgeData=*/nullptr,
++                       pNumDependentNodes);
++#else
+     NV_FE_CALL_TO_CUDA(
+         cuda_graph_node_get_dependent_nodes, cudaGraphNodeGetDependentNodes, node, pDependentNodes, pNumDependentNodes);
++#endif
+ }
+ 
+ inline cudaError_t
+diff --git a/samples/legacy_samples/utils/error_util.h b/samples/legacy_samples/utils/error_util.h
+index 6b9b0d9c..cad80336 100644
+--- a/samples/legacy_samples/utils/error_util.h
++++ b/samples/legacy_samples/utils/error_util.h
+@@ -132,18 +132,20 @@ showDevices(void) {
+     for (int i = 0; i < totalDevices; i++) {
+         struct cudaDeviceProp prop;
+         checkCudaErrors(cudaGetDeviceProperties(&prop, i));
+-        printf(
+-            "device %d : sms %2d  Capabilities %d.%d, SmClock %.1f Mhz, MemSize (Mb) %d, MemClock %.1f Mhz, Ecc=%d, "
+-            "boardGroupID=%d\n",
+-            i,
+-            prop.multiProcessorCount,
+-            prop.major,
+-            prop.minor,
+-            (float)prop.clockRate * 1e-3,
+-            (int)(prop.totalGlobalMem / (1024 * 1024)),
+-            (float)prop.memoryClockRate * 1e-3,
+-            prop.ECCEnabled,
+-            prop.multiGpuBoardGroupID);
++        printf("device %d : sms %2d  Capabilities %d.%d, MemSize (Mb) %d, Ecc=%d, boardGroupID=%d",
++               i,
++               prop.multiProcessorCount,
++               prop.major,
++               prop.minor,
++               (int)(prop.totalGlobalMem / (1024 * 1024)),
++               prop.ECCEnabled,
++               prop.multiGpuBoardGroupID);
++#if (CUDART_VERSION < 13000)
++        printf(", SmClock %.1f Mhz, MemClock %.1f Mhz",  // Removed in CUDA 13.0
++               (float)prop.clockRate * 1e-3,
++               (float)prop.memoryClockRate * 1e-3);
++#endif
++        printf("\n");
+     }
+ }
+ 
