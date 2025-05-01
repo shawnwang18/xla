@@ -15,6 +15,8 @@ limitations under the License.
 
 #include <cstddef>
 
+// https://github.com/NVIDIA/cccl/pull/4512 and nvbug/5226885
+#include <thrust/iterator/detail/iterator_category_to_system.h>
 #include "cub/device/device_radix_sort.cuh"
 #include "cub/device/device_segmented_radix_sort.cuh"
 #include "third_party/gpus/cuda/include/cuda.h"
