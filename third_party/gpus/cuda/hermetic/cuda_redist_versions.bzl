@@ -413,6 +413,7 @@ REDIST_VERSIONS_TO_BUILD_TEMPLATES = {
     "libcusolver": {
         "repo_name": "cuda_cusolver",
         "version_to_template": {
+            "12": "//third_party/gpus/cuda/hermetic:cuda_cusolver.BUILD.tpl",
             "11": "//third_party/gpus/cuda/hermetic:cuda_cusolver.BUILD.tpl",
         },
     },
