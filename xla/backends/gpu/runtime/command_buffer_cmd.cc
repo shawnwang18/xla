@@ -279,7 +279,11 @@ static std::vector<CommandOperation> CreateCommandOperations(
     CommandBufferCmdExecutor::SynchronizationMode synchronization_mode) {
   std::vector<CommandOperation> operations;
   operations.reserve(commands.size());
-
+  VLOG(3) << "CreateCommandOperations with synchronization mode: "
+          << (synchronization_mode ==
+                      CommandBufferCmdExecutor::SynchronizationMode::kConcurrent
+                  ? "Concurrent"
+                  : "LHS");
   if (synchronization_mode ==
       CommandBufferCmdExecutor::SynchronizationMode::kConcurrent) {
     // For concurrent synchronization mode, pass in buffer and resouces for
