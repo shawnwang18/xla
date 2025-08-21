@@ -365,7 +365,7 @@ absl::StatusOr<CommandBufferCmdExecutor> CommandBufferCmdExecutor::Create(
   // In automatic synchronization mode construct an execution graph for the
   // sequence of commands and derive the structure of command dependencies
   // from the buffer use conflicts.
-  if (synchronization_mode == SynchronizationMode::kConcurrent) {
+  if (synchronization_mode != SynchronizationMode::kSequential) {
     auto operations = CreateCommandOperations(commands, synchronization_mode);
     TF_ASSIGN_OR_RETURN(execution_graph,
                         ExecutionGraph::Create<CommandOperation>(operations));
@@ -695,10 +695,10 @@ absl::StatusOr<std::string> CommandBufferCmdExecutor::RenderExecutionGraph() {
     return Unimplemented("No execution graph renderer registered");
   }
 
-  if (synchronization_mode_ != SynchronizationMode::kConcurrent) {
+  if (synchronization_mode_ == SynchronizationMode::kSequential) {
     return Unimplemented(
         "Execution graph rendering is only supported for "
-        "concurrent synchronization mode");
+        "concurrent/LHS synchronization mode");
   }
 
   auto operations = CreateCommandOperations(commands_, synchronization_mode_);
