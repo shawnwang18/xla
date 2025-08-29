@@ -2331,8 +2331,7 @@ DynamicSliceFusionCmd::DynamicSliceFusionCmd(
     std::vector<std::optional<uint64_t>> offset_byte_sizes,
     std::optional<
         const DynamicSliceThunk::OffsetAsFunctionOfIndvarModulesMetadata*>
-        offset_as_function_of_indvar_metadata,
-    ResourceUseVector resources)
+        offset_as_function_of_indvar_metadata)
     : CommandBufferCmd(CommandBufferCmdType::kDynamicSliceFusionCmd
                        ),
       embedded_commands_(std::move(embedded_commands)),
@@ -2596,7 +2595,7 @@ absl::StatusOr<const se::CommandBuffer::Command*> DynamicSliceFusionCmd::Record(
   RecordParams nested_record_params = {state, std::nullopt, false};
   TF_RETURN_IF_ERROR(embedded_commands_.Record(
       new_params, nested_record_params,
-      CommandBufferCmd::RecordCreate {} nested_command_buffer.get()));
+      CommandBufferCmd::RecordCreate {}, nested_command_buffer.get()));
 
   // For command buffer instantiation ran by CommandBufferThunk::Initialize, we
   // must not step the Indvar, because it is not a real run.
