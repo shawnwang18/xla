@@ -5,8 +5,8 @@ load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 def repo():
     """Imports rmm."""
 
-    RMM_VERSION = "25.08.00"
-    RMM_SHA256 = "6931f4de923b617af8c3b97505d79fd3b7b6b5492c1b5a8cd8bcfdc147cdf458"
+    RMM_VERSION = "25.12.00a"
+    RMM_SHA256 = "6b1b37d9c4cf52dd47f3d59c86179e2b1f47413d65250b2ecd934dcffdfb2d2b"
 
     tf_http_archive(
         name = "rmm",
