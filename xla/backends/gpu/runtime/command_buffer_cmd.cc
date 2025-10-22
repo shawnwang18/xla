@@ -2730,9 +2730,10 @@ DynamicSliceCopyFusionCmd::Record(const Thunk::ExecuteParams& execute_params,
       [&](const se::CommandBuffer::Command* command) {
         int64_t iteration_index = 0;
         if (offsets_.depends_on_loop) {
-          if (WhileThunk::RunningWhileThunkLoop()) {
+          int64_t depth = WhileThunk::RunningWhileThunkDepth();
+          if (depth > 0) {
             TF_ASSIGN_OR_RETURN(iteration_index,
-                                WhileThunk::CurrentLoopIteration());
+                                WhileThunk::CurrentLoopIteration(depth-1));
           } else {
             iteration_index = record_params.unroll_iteration;
           }

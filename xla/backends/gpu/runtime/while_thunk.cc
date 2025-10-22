@@ -61,7 +61,7 @@ static std::list<RunningLoop>& RunningLoops() {
   return loops;
 }
 
-bool WhileThunk::RunningWhileThunkLoop() { return RunningLoops().size() > 0; }
+int64_t WhileThunk::RunningWhileThunkDepth() { return RunningLoops().size(); }
 
 absl::StatusOr<int64_t> WhileThunk::CurrentLoopIteration(int64_t depth) {
   if (depth >= RunningLoops().size()) {
