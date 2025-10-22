@@ -595,9 +595,23 @@ TEST_P(CommandBufferTest, DynamicSliceCopyFusionCmd) {
 
   TF_ASSERT_OK_AND_ASSIGN(auto unrolled_module,
                           ParseAndReturnVerifiedModule(hlo_text, config));
+  // Compile once and execute multiple times to exercise command buffer update.
+  PreprocessModuleForTestRunner(unrolled_module.get());
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto executable,
+      CreateExecutable(std::move(unrolled_module), /*run_hlo_passes=*/false));
 
-  EXPECT_TRUE(RunAndCompareNoHloPasses(std::move(unrolled_module),
-                                       ErrorSpec{1e-3, 2e-3}));
+  // No inputs for this module.
+  std::vector<Literal> no_args;
+
+  TF_ASSERT_OK_AND_ASSIGN(Literal baseline, test_runner().ExecuteWithExecutable(
+                                                executable.get(), no_args));
+  for (int i = 0; i < 2; ++i) {
+    TF_ASSERT_OK_AND_ASSIGN(Literal out, test_runner().ExecuteWithExecutable(
+                                             executable.get(), no_args));
+    EXPECT_TRUE(
+        LiteralTestUtil::NearOrEqual(baseline, out, ErrorSpec{1e-3, 2e-3}));
+  }
 }
 
 TEST_P(CommandBufferUnrollTest, WhileLoop) {
