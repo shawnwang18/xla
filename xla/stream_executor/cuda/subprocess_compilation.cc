@@ -300,8 +300,7 @@ absl::StatusOr<cuda::Assembly> CompileGpuAsmUsingPtxAs(
       ptx_path,
       "-o",
       cubin_path,
-      absl::StrCat("-arch=", cc.GetPtxAsTargetName(
-                                 CudaComputeCapability::CompileMode::kSass)),
+      absl::StrCat("-arch=", cc.GetHighestKnownCompatiblePtxAsTargetName()),
       "--warn-on-spills"};
   if (VLOG_IS_ON(2) || dump_compilation_log) {
     ptxas_args.push_back("-v");

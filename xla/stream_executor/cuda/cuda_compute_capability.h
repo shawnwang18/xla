@@ -89,6 +89,11 @@ struct CudaComputeCapability {
   static absl::StatusOr<CudaComputeCapability> FromString(
       absl::string_view cuda_arch_name);
 
+  // Parses an architecture name in the format
+  // "sm_<major><minor><feature_extension>", example: "sm_90" or "sm_103f"
+  static absl::StatusOr<CudaComputeCapability> FromPtxAsTargetName(
+      absl::string_view cuda_arch_name);
+
   constexpr static CudaComputeCapability Pascal() {
     return CudaComputeCapability{kPascal, 0};
   }
@@ -205,6 +210,34 @@ struct CudaComputeCapability {
     return other.SupportsAllFeaturesOf(*this);
   }
 
+  // Returns true if compiling for compute capability `this` can enable more
+  // `device` features than compiling for `other`. Returns false if compiling
+  // for `this` would not run on `device`.
+  bool IsMoreSpecializedForDevice(const CudaComputeCapability& device,
+                                  const CudaComputeCapability& other) {
+    if (!device.SupportsAllFeaturesOf(*this)) {
+      return false;
+    }
+    if (!device.SupportsAllFeaturesOf(other)) {
+      return true;
+    }
+    // `this` and `other` would both produce code that could run on `device`
+    const auto rank = [](FeatureExtension ext) {
+      switch (ext) {
+        case FeatureExtension::kAcceleratedFeatures:
+          return 2;
+        case FeatureExtension::kFamilyCompatibleFeatures:
+          return 1;
+        case FeatureExtension::kNone:
+          return 0;
+      }
+    };
+    const int this_rank = rank(feature_extension);
+    const int other_rank = rank(other.feature_extension);
+    return std::tie(this_rank, major, minor) >
+           std::tie(other_rank, other.major, other.minor);
+  }
+
   // Returns a copy of this compute capability without any feature extension
   // set.
   CudaComputeCapability WithoutAnyFeatureExtension() const {
@@ -249,6 +282,9 @@ struct CudaComputeCapability {
   // option.
   std::string GetPtxAsTargetName(
       CompileMode compile_mode = CompileMode::kSass) const;
+
+  // Return the highest known compatible target identifier
+  std::string GetHighestKnownCompatiblePtxAsTargetName() const;
 };
 
 }  // namespace stream_executor

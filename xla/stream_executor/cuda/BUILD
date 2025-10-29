@@ -2204,6 +2204,7 @@ cc_library(
     ]),
     deps = [
         ":cuda_compute_capability_proto_cc",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

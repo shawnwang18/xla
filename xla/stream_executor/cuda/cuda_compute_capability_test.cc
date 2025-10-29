@@ -84,6 +84,33 @@ TEST(CudaComputeCapabilityTest, FromString) {
               StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
+TEST(CudaComputeCapabilityTest, FromPtxAsTargetName) {
+  using FeatureExtension = CudaComputeCapability::FeatureExtension;
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_90"),
+              IsOkAndHolds(CudaComputeCapability(9, 0)));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_90a"),
+              IsOkAndHolds(CudaComputeCapability(
+                  9, 0, FeatureExtension::kAcceleratedFeatures)));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_103"),
+              IsOkAndHolds(CudaComputeCapability(10, 3)));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_103a"),
+              IsOkAndHolds(CudaComputeCapability(
+                  10, 3, FeatureExtension::kAcceleratedFeatures)));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_103f"),
+              IsOkAndHolds(CudaComputeCapability(
+                  10, 3, FeatureExtension::kFamilyCompatibleFeatures)));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("90a"),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_90x"),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_-90"),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_xx0"),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(CudaComputeCapability::FromPtxAsTargetName("sm_xx0a"),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
 TEST(CudaComputeCapabilityTest, ToProto) {
   CudaComputeCapabilityProto proto0 =
       CudaComputeCapability(100, 5,
@@ -303,6 +330,41 @@ TEST(CudaComputeCapabilityTest, ComparisonTest) {
   EXPECT_FALSE(base_but_forward_compatible.CanRunOn(next_generation));
   EXPECT_FALSE(
       base_but_forward_compatible.SupportsAllFeaturesOf(next_generation));
+
+  // a > f > neither if major/minor match
+  EXPECT_TRUE(base_but_forward_compatible.IsMoreSpecializedForDevice(
+      /*device=*/base, /*other=*/base));
+  EXPECT_TRUE(base_but_accelerated.IsMoreSpecializedForDevice(/*device=*/base,
+                                                              /*other=*/base));
+  EXPECT_TRUE(base_but_accelerated.IsMoreSpecializedForDevice(
+      /*device=*/base, /*other=*/base_but_forward_compatible));
+
+  // regular version comparison if the extension is the same
+  EXPECT_TRUE(newer_but_same_generation.IsMoreSpecializedForDevice(
+      /*device=*/newer_but_same_generation, /*other=*/base));
+  EXPECT_TRUE(next_generation.IsMoreSpecializedForDevice(
+      /*device=*/next_generation, /*other=*/base));
+  EXPECT_TRUE(newer_but_same_generation_compatible.IsMoreSpecializedForDevice(
+      /*device=*/newer_but_same_generation,
+      /*other=*/base_but_forward_compatible));
+
+  // 1.1a > 1.0f for 1.1
+  EXPECT_TRUE(newer_but_same_generation_accelerated.IsMoreSpecializedForDevice(
+      /*device=*/newer_but_same_generation,
+      /*other=*/base_but_forward_compatible));
+
+  // `this` doesn't support `device
+  EXPECT_FALSE(base_but_forward_compatible.IsMoreSpecializedForDevice(
+      /*device=*/next_generation, /*other=*/next_generation));
+  EXPECT_FALSE(base_but_accelerated.IsMoreSpecializedForDevice(
+      /*device=*/next_generation, /*other=*/next_generation));
+
+  // `other` doesn't support `device`
+  EXPECT_TRUE(base.IsMoreSpecializedForDevice(/*device=*/base,
+                                              /*other=*/next_generation));
+  EXPECT_TRUE(
+      base.IsMoreSpecializedForDevice(/*device=*/newer_but_same_generation,
+                                      /*other=*/next_generation));
 }
 
 TEST(CudaComputeCapabilityTest, GetPtxAsTargetName) {
@@ -328,6 +390,55 @@ TEST(CudaComputeCapabilityTest, GetPtxAsTargetName) {
           CudaComputeCapability::FeatureExtension::kFamilyCompatibleFeatures)
           .GetPtxAsTargetName(),
       "sm_100f");
+}
+
+TEST(CudaComputeCapabilityTest, GetHighestKnownCompatiblePtxAsTargetName) {
+  using FeatureExtension = CudaComputeCapability::FeatureExtension;
+  ASSERT_EQ((CudaComputeCapability{9, 0, FeatureExtension::kNone}
+                 .GetHighestKnownCompatiblePtxAsTargetName()),
+            "sm_90");
+  ASSERT_EQ((CudaComputeCapability{9, 0, FeatureExtension::kAcceleratedFeatures}
+                 .GetHighestKnownCompatiblePtxAsTargetName()),
+            "sm_90a");
+  ASSERT_EQ(
+      (CudaComputeCapability{10, 0, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_100a");
+  ASSERT_EQ(
+      (CudaComputeCapability{10, 0, FeatureExtension::kFamilyCompatibleFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_100f");
+  ASSERT_EQ(
+      (CudaComputeCapability{10, 3, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_103a");
+  ASSERT_EQ(
+      (CudaComputeCapability{11, 0, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_110a");
+  ASSERT_EQ(
+      (CudaComputeCapability{12, 0, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_120a");
+  ASSERT_EQ(
+      (CudaComputeCapability{12, 1, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_121a");
+  // Do not use the extension for a yet-unknown compute capability.
+  // https://docs.nvidia.com/cuda/parallel-thread-execution/#release-notes-ptx-release-history
+  ASSERT_EQ(
+      (CudaComputeCapability{10, 9}.GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_103f");
+  ASSERT_EQ(
+      (CudaComputeCapability{10, 9, FeatureExtension::kAcceleratedFeatures}
+           .GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_103f");
+  ASSERT_EQ(
+      (CudaComputeCapability{12, 9}.GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_121f");
+  ASSERT_EQ(
+      (CudaComputeCapability{13, 0}.GetHighestKnownCompatiblePtxAsTargetName()),
+      "sm_121");
 }
 
 TEST(CudaComputeCapabilityTest, WithoutAnyFeatureExtension) {

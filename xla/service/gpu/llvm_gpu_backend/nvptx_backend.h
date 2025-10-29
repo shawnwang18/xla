@@ -31,12 +31,6 @@ limitations under the License.
 
 namespace xla::gpu::nvptx {
 
-// Gets the GPU name as it's known to LLVM for a given compute
-// capability.  If we see an unrecognized compute capability, we
-// return the highest one that is known and below the selected device.
-std::string GetSmName(
-    stream_executor::CudaComputeCapability compute_capability);
-
 // Compiles the argument module and returns it. libdevice_dir_path is the
 // parent directory of the libdevice bitcode libraries. The contents of the
 // module may be changed.
