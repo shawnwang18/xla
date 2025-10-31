@@ -1139,7 +1139,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/platform:statusor",
     ] + if_cuda_is_configured(
-        [":select_k_exec_raft"],
+        [":select_k_exec_stub"], # FIXME(olupton): revert _stub -> _raft once RMM supports CUDA 13.1+ CCCL
         no_cuda = [":select_k_exec_stub"],
     ),
 )
