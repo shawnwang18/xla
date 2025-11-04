@@ -1769,6 +1769,21 @@ absl::StatusOr<MemoryType> CudaExecutor::GetPointerMemorySpace(
   }
 }
 
+int CudaExecutor::GetGpuStreamPriority(StreamPriority priority) {
+  if (priority == StreamPriority::Default) {
+    return 0;
+  }
+  std::unique_ptr<ActivateContext> activation = Activate();
+  int lowest, highest;
+  auto status = cuda::ToStatus(cuCtxGetStreamPriorityRange(&lowest, &highest));
+  if (!status.ok()) {
+    LOG(ERROR)
+        << "Could not query stream priority range. Returning default priority.";
+    return 0;
+  }
+  return priority == StreamPriority::Highest ? highest : lowest;
+}
+
 absl::StatusOr<const CudaKernel*> CudaExecutor::GetCudaKernel(
     const Kernel* kernel) {
   absl::MutexLock lock{in_memory_modules_mu_};

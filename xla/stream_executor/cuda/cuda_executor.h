@@ -143,6 +143,8 @@ class CudaExecutor : public GpuExecutor {
   // object, the offset of the slices should be aligned with this granularity.
   absl::StatusOr<size_t> GetVmmGranularity() const;
 
+  int GetGpuStreamPriority(StreamPriority priority);
+
   // RAII wrapper for a VMM memory handle.
   class VmmMemoryHandle {
    public:
