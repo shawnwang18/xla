@@ -42,6 +42,7 @@ limitations under the License.
 #include "tsl/profiler/lib/profiler_lock.h"
 #include "tsl/profiler/lib/traceme.h"
 #include "tsl/profiler/lib/traceme_encode.h"
+#include "tsl/profiler/lib/scoped_annotation.h"
 
 namespace xla::gpu {
 
@@ -198,6 +199,8 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
                             {"num_commands", commands_.size()}});
     });
 
+    tsl::profiler::ScopedAnnotation annotation("Command Buffer Creation");
+
     uint64_t start_micros = tsl::Env::Default()->NowMicros();
 
     // Update recorded buffer allocations.
@@ -272,6 +275,8 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
                             {"num_commands", commands_.size()},
                             {"num_executions", cmd_buffer->num_executions}});
     });
+
+    tsl::profiler::ScopedAnnotation annotation("Command Buffer Update");
 
     uint64_t start_micros = tsl::Env::Default()->NowMicros();
 

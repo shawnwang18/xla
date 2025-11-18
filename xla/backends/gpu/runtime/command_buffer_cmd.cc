@@ -98,7 +98,6 @@ limitations under the License.
 #include "xla/types.h"  // IWYU pragma: keep
 #include "xla/util.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
-#include "tsl/profiler/lib/traceme.h"
 
 namespace xla::gpu {
 
@@ -2027,10 +2026,7 @@ CollectiveCmd::RecordTracedCommand(
     absl::FunctionRef<absl::Status(se::Stream*)> trace) {
   std::unique_ptr<se::CommandBuffer> nested_cmd;
   {
-    tsl::profiler::TraceMe nccl_activity(
-        [&] { return "NCCL capture activity"; },
-        tsl::profiler::TraceMeLevel::kInfo);
-
+    tsl::profiler::ScopedAnnotation annotation("Collective Capture");
     TF_ASSIGN_OR_RETURN(
         nested_cmd, std::move(se::TraceCommandBufferFactory::Create(
                         execute_params.stream->parent(),

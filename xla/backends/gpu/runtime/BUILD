@@ -137,7 +137,6 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
         "@tsl//tsl/profiler/lib:scoped_annotation",
-        "@tsl//tsl/profiler/lib:traceme",
     ],
 )
 
@@ -337,6 +336,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@tsl//tsl/profiler/lib:profiler_lock",
+        "@tsl//tsl/profiler/lib:scoped_annotation",
         "@tsl//tsl/profiler/lib:traceme",
         "@tsl//tsl/profiler/lib:traceme_encode",
     ] + xla_internal(["service:execution_graph_visualizer_google"]),
