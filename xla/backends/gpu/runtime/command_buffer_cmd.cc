@@ -98,6 +98,7 @@ limitations under the License.
 #include "xla/types.h"  // IWYU pragma: keep
 #include "xla/util.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
+#include "tsl/profiler/lib/traceme.h"
 
 namespace xla::gpu {
 
@@ -2024,11 +2025,17 @@ CollectiveCmd::RecordTracedCommand(
     const RecordParams& record_params, RecordAction record_action,
     se::CommandBuffer* command_buffer,
     absl::FunctionRef<absl::Status(se::Stream*)> trace) {
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<se::CommandBuffer> nested_cmd,
-                      se::TraceCommandBufferFactory::Create(
-                          execute_params.stream->parent(),
-                          execute_params.command_buffer_trace_stream, trace));
+  std::unique_ptr<se::CommandBuffer> nested_cmd;
+  {
+    tsl::profiler::TraceMe nccl_activity(
+        [&] { return "NCCL capture activity"; },
+        tsl::profiler::TraceMeLevel::kInfo);
 
+    TF_ASSIGN_OR_RETURN(
+        nested_cmd, std::move(se::TraceCommandBufferFactory::Create(
+                        execute_params.stream->parent(),
+                        execute_params.command_buffer_trace_stream, trace)));
+  }
   if (priority() != se::StreamPriority::Default) {
     TF_RETURN_IF_ERROR(nested_cmd->SetPriority(priority()));
   }
