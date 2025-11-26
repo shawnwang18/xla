@@ -901,5 +901,65 @@ TEST_F(AutotunerTest, DumpHlos) {
           MatchesRegex(".*\\.test_module\\.autotuner_1\\.add\\.before\\.txt")));
 }
 
+constexpr absl::string_view kF8MatmulHlo = R"(
+  HloModule test_module
+
+  ENTRY main {
+    p0 = f8e4m3fn[16,16384,7168] parameter(0)
+    p1 = f8e4m3fn[16,16384,7168] parameter(1)
+    p2 = f32[] parameter(2)
+    p3 = f32[] parameter(3)
+    p4 = f32[] parameter(4)
+    ROOT %custom_call = (f8e4m3fn[16,16384,7168], f32[], s8[33554432]) custom-call(p0, p1, p2, p3, p4), custom_call_target="__cublas$lt$matmul$f8", backend_config="{\"operation_queue_id\":\"0\",\"wait_on_operation_queues\":[],\"gemm_backend_config\":{\"alpha_real\":1,\"beta\":0,\"dot_dimension_numbers\":{\"lhs_contracting_dimensions\":[\"2\"],\"rhs_contracting_dimensions\":[\"1\"],\"lhs_batch_dimensions\":[\"0\"],\"rhs_batch_dimensions\":[\"0\"]},\"alpha_imag\":0,\"precision_config\":{\"operand_precision\":[\"DEFAULT\",\"DEFAULT\"],\"algorithm\":\"ALG_UNSET\"},\"epilogue\":\"DEFAULT\",\"lhs_stride\":\"33554432\",\"rhs_stride\":\"14680064\",\"grad_x\":false,\"grad_y\":false,\"damax_output\":true},\"force_earliest_schedule\":false,\"reification_cost\":[],\"device_type\":\"DEVICE_TYPE_INVALID\"}"
+  }
+)";
+
+TEST_F(AutotunerTest, AutotuneF8Matmul) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kF8MatmulHlo));
+
+  auto cache_manager = std::make_unique<MockAutotunerCache>();
+  EXPECT_CALL(*cache_manager, Lookup(_)).WillOnce(Return(std::nullopt));
+  EXPECT_CALL(*cache_manager, Insert(_, _)).WillOnce(Return(absl::OkStatus()));
+
+  std::vector<std::unique_ptr<BackendConfig>> configs;
+  for (int i = 0; i < 8; ++i) {
+    configs.push_back(GetTestConfig(absl::StrCat("config_", i)));
+  }
+
+  auto backend = std::make_unique<MockCodegenBackend>();
+  EXPECT_CALL(*backend,
+              GetSupportedConfigs(InstructionMatcher(HloOpcode::kCustomCall)))
+      .WillOnce(Return(std::move(configs)));
+
+  // All compiles succeed.
+  EXPECT_CALL(*backend, Compile(_, _))
+      .Times(8)
+      .WillRepeatedly([] { return std::unique_ptr<Executable>(); });
+  EXPECT_CALL(*backend, ApplyConfig(_, _)).WillOnce(Return(absl::OkStatus()));
+
+  auto profiler = std::make_unique<MockProfiler>();
+  EXPECT_CALL(*profiler, CreateInputBuffers(_))
+      .WillOnce(Return(std::make_unique<InputBuffers>()));
+
+  // Profiles succeed.
+  EXPECT_CALL(*profiler, Profile(_, _))
+      .Times(8)
+      .WillRepeatedly([] { return ProfileResult({absl::Seconds(1)}); });
+
+  std::vector<std::unique_ptr<CodegenBackend>> backends;
+  backends.push_back(std::move(backend));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto autotuner,
+      Autotuner::Create(std::move(backends), std::move(profiler), config_,
+                        std::move(cache_manager)));
+
+  auto custom_call = module->entry_computation()->root_instruction();
+  EXPECT_THAT(autotuner->Autotune(custom_call), IsOk());
+}
+
+
+
 }  // namespace
 }  // namespace xla
