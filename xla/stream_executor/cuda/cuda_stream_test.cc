@@ -30,10 +30,12 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "xla/stream_executor/blas.h"
 #include "xla/stream_executor/cuda/cuda_event.h"
 #include "xla/stream_executor/cuda/cuda_executor.h"
 #include "xla/stream_executor/cuda/cuda_platform_id.h"
 #include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/gpu/gpu_blas_lt.h"
 #include "xla/stream_executor/gpu/gpu_test_kernels.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/launch_dim.h"
@@ -305,6 +307,88 @@ TEST_F(CudaStreamTest, WaitForOtherStream) {
               ElementsAre(ExecutionStage::kBeforeWaitForEvent,
                           ExecutionStage::kAfterWaitForEvent,
                           ExecutionStage::kAfterWaitForStream));
+}
+
+TEST_F(CudaStreamTest, BetaZeroPassesNullC) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<CudaStream> stream,
+                          CudaStream::Create(executor_,
+                                             /*priority=*/std::nullopt));
+
+  if (!executor_->AsBlas()) {
+    GTEST_SKIP() << "Blas support not available";
+  }
+  auto* blas_lt = reinterpret_cast<BlasLt*>(executor_->AsBlas()->GetBlasLt());
+  if (!blas_lt) {
+    GTEST_SKIP() << "BlasLt not available";
+  }
+
+  MatrixLayout a_layout{xla::PrimitiveType::F32, 16, 16,
+                        MatrixLayout::Order::kRowMajor};
+  MatrixLayout b_layout{xla::PrimitiveType::F32, 16, 16,
+                        MatrixLayout::Order::kRowMajor};
+  MatrixLayout c_layout{xla::PrimitiveType::F32, 16, 16,
+                        MatrixLayout::Order::kRowMajor};
+  MatrixLayout d_layout{xla::PrimitiveType::F32, 16, 16,
+                        MatrixLayout::Order::kRowMajor};
+
+  GemmConfig config;
+  config.lhs_layout = a_layout;
+  config.rhs_layout = b_layout;
+  config.c_layout = c_layout;
+  config.output_layout = d_layout;
+  config.alpha = {1.0, 0.0};
+  config.beta = 0.0;  // Key: Beta is 0.
+  config.compute_precision = 0;
+
+  DeviceMemory<float> a_buffer = executor_->AllocateArray<float>(16 * 16);
+  DeviceMemory<float> b_buffer = executor_->AllocateArray<float>(16 * 16);
+  DeviceMemory<float> d_buffer = executor_->AllocateArray<float>(16 * 16);
+
+  // Initialize inputs to 1.0f.
+  // 1.0f in hex representation is 0x3f800000.
+  ASSERT_THAT(stream->Memset32(&a_buffer, 0x3f800000, 16 * 16 * sizeof(float)),
+              absl_testing::IsOk());
+  ASSERT_THAT(stream->Memset32(&b_buffer, 0x3f800000, 16 * 16 * sizeof(float)),
+              absl_testing::IsOk());
+  // Initialize output to 0.0f.
+  ASSERT_THAT(stream->MemZero(&d_buffer, 16 * 16 * sizeof(float)),
+              absl_testing::IsOk());
+
+  // Create a small C buffer. If accessed as 16x16 float, it would be out of
+  // bounds/invalid if we were strict.
+  DeviceMemory<float> c_buffer = executor_->AllocateArray<float>(1);
+
+  auto plan_or = blas_lt->GetMatmulPlan(config, BlasLt::Epilogue::kDefault);
+  ASSERT_TRUE(plan_or.ok());
+  auto plan = std::move(plan_or.value());
+
+  BlasLt::MemoryArgs args;
+  args.a = a_buffer;
+  args.b = b_buffer;
+  args.c = c_buffer;  // Passed, but should be ignored
+  args.d = d_buffer;
+
+  auto algos_or = plan->GetAlgorithms(stream.get(), 1);
+  ASSERT_TRUE(algos_or.ok());
+  ASSERT_FALSE(algos_or.value().empty());
+  ASSERT_TRUE(plan->SetAlgorithm(algos_or.value()[0]).ok());
+
+  size_t workspace_size = algos_or.value()[0].workspace_size;
+  DeviceMemoryBase workspace;
+  if (workspace_size > 0) {
+    workspace = executor_->AllocateArray<int8_t>(workspace_size);
+  }
+  args.workspace = workspace;
+
+  auto status = plan->ExecuteOnStream(stream.get(), args, nullptr);
+  EXPECT_TRUE(status.ok()) << status;
+
+  std::vector<float> result(16 * 16);
+  ASSERT_THAT(stream->MemcpyD2H(d_buffer, absl::MakeSpan(result)),
+              absl_testing::IsOk());
+  EXPECT_THAT(stream->BlockHostUntilDone(), absl_testing::IsOk());
+
+  EXPECT_THAT(result, Each(16.0f));
 }
 
 }  // namespace
