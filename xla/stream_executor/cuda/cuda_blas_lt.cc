@@ -177,7 +177,8 @@ absl::Status BlasLt::Init() {
 
   VLOG(2) << "MatrixLayout::Create: num_rows: " << m.num_rows
           << " num_cols:" << (int)m.num_cols << ", order: " << (int)m.order
-          << "," << " batchsz " << m.batch_size
+          << ","
+          << " batchsz " << m.batch_size
           << " leaddimstride: " << m.leading_dim_stride
           << " batch_stride: " << m.batch_stride;
 
@@ -426,9 +427,8 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
                                  args.d_amax.opaque()));
     }
 #else
-    if (!(a_scale == nullptr && b_scale == nullptr &&
-          args.c_scale == nullptr && args.d_scale == nullptr &&
-          args.d_amax == nullptr)) {
+    if (!(a_scale == nullptr && b_scale == nullptr && args.c_scale == nullptr &&
+          args.d_scale == nullptr && args.d_amax == nullptr)) {
       return absl::InternalError(
           "A/B/C/D scales and amax require cublasLt >= 11.8");
     }
@@ -474,9 +474,8 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
     if (palgo != nullptr) {
       SE_CUBLAS_RETURN_IF_ERROR(cublasLtMatmul(
           blas_lt->blas_lt_.get(), op_desc_.get(), alpha, a.opaque(),
-          a_desc_.get(), b.opaque(), b_desc_.get(), beta, c_ptr,
-          c_desc_.get(), args.d.opaque(), d_desc_.get(), palgo, workspace_addr,
-          workspace_size,
+          a_desc_.get(), b.opaque(), b_desc_.get(), beta, c_ptr, c_desc_.get(),
+          args.d.opaque(), d_desc_.get(), palgo, workspace_addr, workspace_size,
           absl::bit_cast<CUstream>(stream->platform_specific_handle().stream)));
     } else {
       return absl::InternalError("cublaslt: Invalid algorithm type");
