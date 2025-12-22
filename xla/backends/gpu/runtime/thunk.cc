@@ -56,7 +56,8 @@ Thunk::ExecuteParams Thunk::ExecuteParams::Create(
     const BufferAllocations& buffer_allocations, se::Stream* stream,
     se::Stream* command_buffer_trace_stream,
     CollectiveParams* collective_params, CollectiveCliques* collective_cliques,
-    ExecutionStreamIdMap additional_compute_streams) {
+    ExecutionStreamIdMap additional_compute_streams,
+    const CommandBufferCmd::RecordParams* record_params) {
   return ExecuteParams(&buffer_allocations, stream, command_buffer_trace_stream,
                        collective_params, collective_cliques,
                        run_options.run_options().device_to_host_stream(),
@@ -70,7 +71,8 @@ Thunk::ExecuteParams Thunk::ExecuteParams::Create(
                                  .gpu_executable_run_options()
                                  ->enable_mock_collectives()
                            : false,
-                       run_options.run_options().run_id().ToInt());
+                       run_options.run_options().run_id().ToInt(),
+                       record_params);
 }
 
 Thunk::ExecuteParams Thunk::ExecuteParams::CloneWithNewAllocations(
@@ -93,9 +95,11 @@ Thunk::ExecuteParams::ExecuteParams(
     RecvDeviceMemoryFunction* recv_device_memory_function,
     const ffi::ExecutionContext* ffi_execution_context,
     ExecutionStreamIdMap additional_compute_streams, bool mock_collectives,
-    int64_t execution_id)
+    int64_t execution_id,
+    const CommandBufferCmd::RecordParams* record_params)
     : buffer_allocations(buffer_allocations),
       stream(stream),
+      record_params(record_params),
       command_buffer_trace_stream(command_buffer_trace_stream),
       collective_params(collective_params),
       collective_cliques(collective_cliques),

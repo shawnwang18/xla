@@ -22,6 +22,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -201,38 +202,44 @@ class CommandBufferCmd {
   // buffers (same command can be recorded into multiple command buffers).
   class StateManager {
    public:
+    // Variant type for identifying either a CommandBufferCmd or a Thunk.
+    using CmdOrThunk = std::variant<const CommandBufferCmd*, const Thunk*>;
+
     virtual ~StateManager() = default;
 
+    // GetOrNull overloads for CmdOrThunk variant
     template <typename ConcreteState>
-    ConcreteState* GetOrNull(const CommandBufferCmd* cmd,
+    ConcreteState* GetOrNull(CmdOrThunk cmd_or_thunk,
                              const se::CommandBuffer* command_buffer,
                              int64_t unroll_iteration = 0) {
       static_assert(std::is_base_of_v<State, ConcreteState>);
-      return static_cast<ConcreteState*>(GetOrNull(
-          cmd, command_buffer, GetTypeId<ConcreteState>(), unroll_iteration));
+      return static_cast<ConcreteState*>(
+          GetOrNull(cmd_or_thunk, command_buffer, GetTypeId<ConcreteState>(),
+                    unroll_iteration));
     }
 
+    // GetOrCreate overloads for CmdOrThunk variant with create function
     template <typename ConcreteState>
     ConcreteState* GetOrCreate(
-        const CommandBufferCmd* cmd, const se::CommandBuffer* command_buffer,
+        CmdOrThunk cmd_or_thunk, const se::CommandBuffer* command_buffer,
         absl::FunctionRef<std::unique_ptr<ConcreteState>()> create,
         int64_t unroll_iteration = 0) {
       static_assert(std::is_base_of_v<State, ConcreteState>);
       return static_cast<ConcreteState*>(
-          GetOrCreate(cmd, command_buffer, GetTypeId<ConcreteState>(),
+          GetOrCreate(cmd_or_thunk, command_buffer, GetTypeId<ConcreteState>(),
                       unroll_iteration, [&] { return create(); }));
     }
 
+    // GetOrCreate overloads for CmdOrThunk variant with default construction
     template <typename ConcreteState>
-    ConcreteState* GetOrCreate(const CommandBufferCmd* cmd,
+    ConcreteState* GetOrCreate(CmdOrThunk cmd_or_thunk,
                                const se::CommandBuffer* command_buffer,
                                int64_t unroll_iteration = 0) {
       return GetOrCreate<ConcreteState>(
-          cmd, command_buffer, [] { return std::make_unique<ConcreteState>(); },
-          unroll_iteration);
+          cmd_or_thunk, command_buffer,
+          [] { return std::make_unique<ConcreteState>(); }, unroll_iteration);
     }
 
-   private:
     // We use TypeId to distinguish between different state types.
     TSL_LIB_GTL_DEFINE_INT_TYPE(TypeId, int64_t);
 
@@ -242,19 +249,22 @@ class CommandBufferCmd {
       return id;
     }
 
-    static TypeId GetNextTypeId();
-
-    State* GetOrNull(const CommandBufferCmd* cmd,
+    // Non-templated GetOrNull that takes CmdOrThunk variant directly.
+    State* GetOrNull(CmdOrThunk cmd_or_thunk,
                      const se::CommandBuffer* command_buffer, TypeId type_id,
                      int64_t unroll_iteration);
 
-    State* GetOrCreate(const CommandBufferCmd* cmd,
+    // Non-templated GetOrCreate that takes CmdOrThunk variant directly.
+    State* GetOrCreate(CmdOrThunk cmd_or_thunk,
                        const se::CommandBuffer* command_buffer, TypeId type_id,
                        int64_t unroll_iteration,
                        absl::FunctionRef<std::unique_ptr<State>()> create);
 
-    using Key = std::tuple<const CommandBufferCmd*, const se::CommandBuffer*,
-                           TypeId, int64_t>;
+   private:
+    static TypeId GetNextTypeId();
+
+    using Key =
+        std::tuple<CmdOrThunk, const se::CommandBuffer*, TypeId, int64_t>;
     absl::flat_hash_map<Key, std::unique_ptr<State>> state_;
   };
 
@@ -390,18 +400,70 @@ class CommandBufferCmd {
 };
 
 // A sequence of commands (corresponds to a ThunkSequence from the Thunk API).
+// Each element can be either a CommandBufferCmd (owned) or a Thunk* (not
+// owned).
 class CommandBufferCmdSequence
-    : public std::vector<std::unique_ptr<CommandBufferCmd>> {
+    : public std::vector<
+          std::variant<std::unique_ptr<CommandBufferCmd>, Thunk*>> {
  public:
+  using Element = std::variant<std::unique_ptr<CommandBufferCmd>, Thunk*>;
+
+  // Emplaces a new CommandBufferCmd of the given type.
   template <typename Command, typename... Args>
   void Emplace(Args&&... args) {
     this->emplace_back(std::make_unique<Command>(std::forward<Args>(args)...));
   }
 
+  // Adds a Thunk pointer (not owned by this sequence).
+  void AddThunk(Thunk* thunk) { this->emplace_back(thunk); }
+
+  // Returns true if the element at the given index is a CommandBufferCmd.
+  bool IsCmd(size_t index) const {
+    return std::holds_alternative<std::unique_ptr<CommandBufferCmd>>(
+        (*this)[index]);
+  }
+
+  // Returns true if the element at the given index is a Thunk*.
+  bool IsThunk(size_t index) const {
+    return std::holds_alternative<Thunk*>((*this)[index]);
+  }
+
+  // Returns the CommandBufferCmd* at the given index.
+  // Precondition: IsCmd(index) must be true.
+  CommandBufferCmd* GetCmd(size_t index) {
+    return std::get<std::unique_ptr<CommandBufferCmd>>((*this)[index]).get();
+  }
+
+  // Returns the CommandBufferCmd* at the given index (const version).
+  // Precondition: IsCmd(index) must be true.
+  const CommandBufferCmd* GetCmd(size_t index) const {
+    return std::get<std::unique_ptr<CommandBufferCmd>>((*this)[index]).get();
+  }
+
+  // Returns the Thunk* at the given index.
+  // Precondition: IsThunk(index) must be true.
+  Thunk* GetThunk(size_t index) { return std::get<Thunk*>((*this)[index]); }
+
+  // Returns the Thunk* at the given index (const version).
+  // Precondition: IsThunk(index) must be true.
+  const Thunk* GetThunk(size_t index) const {
+    return std::get<Thunk*>((*this)[index]);
+  }
+
   std::string ToString() const {
     std::string result;
-    for (const auto& cmd : *this) {
-      result += cmd->ToString() + "\n";
+    for (const auto& element : *this) {
+      std::visit(
+          [&result](const auto& item) {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T,
+                                         std::unique_ptr<CommandBufferCmd>>) {
+              result += item->ToString() + "\n";
+            } else if constexpr (std::is_same_v<T, Thunk*>) {
+              result += item->ToString(/*indent=*/0) + "\n";
+            }
+          },
+          element);
     }
     return result;
   }
@@ -537,6 +599,12 @@ class CommandBufferCmdExecutor {
   std::vector<const se::CommandBuffer::Command*> SinkCommands(
       const RecordParams& record_params, se::CommandBuffer* command_buffer,
       int64_t unroll_iteration) const;
+
+  // Returns dependencies of the given thunk. Returns an error if the thunk
+  // is not found in the command sequence.
+  absl::StatusOr<std::vector<const se::CommandBuffer::Command*>>
+  Dependencies(const RecordParams& record_params,
+               se::CommandBuffer* command_buffer, const Thunk* thunk) const;
 
   // Renders the execution graph using default renderer. Returns url of the
   // rendered graph, or an error if rendering failed.

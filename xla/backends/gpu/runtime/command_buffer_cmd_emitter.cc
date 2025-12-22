@@ -377,9 +377,9 @@ static absl::Status AppendCommands(CommandBufferCmdSequence& cmd_sequence,
   // predecessor has the token write, and control successor does the token read.
   for (const std::unique_ptr<Thunk>& thunk : sequence) {
     for (const Thunk* control_predecessor : thunk->control_predecessors()) {
-      cmd_sequence[thunk_to_index[control_predecessor]]->add_resouce_use(
-          ResourceUse::Read(
-              cmd_sequence[thunk_to_index[thunk.get()]]->token()));
+      cmd_sequence.GetCmd(thunk_to_index[control_predecessor])
+          ->add_resouce_use(ResourceUse::Read(
+              cmd_sequence.GetCmd(thunk_to_index[thunk.get()])->token()));
     }
   }
 

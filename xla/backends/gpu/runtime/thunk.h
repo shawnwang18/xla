@@ -39,6 +39,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/collective_cliques.h"
 #include "xla/backends/gpu/runtime/collective_multimem_registry.h"
 #include "xla/backends/gpu/runtime/collective_params.h"
+#include "xla/backends/gpu/runtime/command_buffer_cmd.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
 #include "xla/backends/gpu/runtime/thunk_id.h"
 #include "xla/core/collectives/communicator.h"
@@ -315,7 +316,8 @@ class Thunk {
         se::Stream* command_buffer_trace_stream,
         CollectiveParams* collective_params,
         CollectiveCliques* collective_cliques,
-        ExecutionStreamIdMap additional_compute_streams = {});
+        ExecutionStreamIdMap additional_compute_streams = {},
+        const CommandBufferCmd::RecordParams* record_params = nullptr);
 
     // Constructs execute parameters from an existing parameters but with
     // different buffer allocations.
@@ -327,6 +329,12 @@ class Thunk {
 
     // Main compute stream on which thunks launch operations.
     se::Stream* stream;
+
+
+    se::CommandBuffer* command_buffer = nullptr;
+
+    // Parameters for recording into command buffer.
+    CommandBufferCmd::RecordParams* record_params = nullptr;
 
     // Auxiliary stream for tracing command buffers. We use a separate stream to
     // avoid accidental tracing of unrelated activities on a main stream.
@@ -369,7 +377,8 @@ class Thunk {
                   RecvDeviceMemoryFunction* recv_device_memory_function,
                   const ffi::ExecutionContext* ffi_execution_context,
                   ExecutionStreamIdMap additional_compute_streams = {},
-                  bool mock_collectives = false, int64_t execution_id = 0);
+                  bool mock_collectives = false, int64_t execution_id = 0,
+                  const CommandBufferCmd::RecordParams* record_params = nullptr);
   };
 
   //===--------------------------------------------------------------------===//
