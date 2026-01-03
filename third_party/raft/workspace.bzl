@@ -5,14 +5,14 @@ load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
 def repo():
     """Imports raft."""
 
-    RAFT_COMMIT = "f54ba714aa42732413350e4c2a46639ab3b67ad5"
-    RAFT_SHA256 = "bfd6818920536c9e76937d3d1e37f2d112bdbdbe589ffd29c6b687609e3cd999"
+    RAFT_VERSION = "25.12.00"
+    RAFT_SHA256 = "daf9747ae0b9937635df22054bf061295d36044344ffa1d113db598272b71a70"
 
     tf_http_archive(
         name = "raft",
         sha256 = RAFT_SHA256,
-        strip_prefix = "raft-{commit}".format(commit = RAFT_COMMIT),
-        urls = tf_mirror_urls("https://github.com/rapidsai/raft/archive/{commit}.tar.gz".format(commit = RAFT_COMMIT)),
+        strip_prefix = "raft-{version}".format(version = RAFT_VERSION),
+        urls = tf_mirror_urls("https://github.com/rapidsai/raft/archive/refs/tags/v{version}.tar.gz".format(version = RAFT_VERSION)),
         build_file = "//third_party/raft:raft.BUILD",
         patch_file = [
             "//third_party/raft:clang_cuda_intrinsics.h.patch",
