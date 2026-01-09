@@ -1284,7 +1284,9 @@ absl::Status ChildCmd::Record(const Thunk::ExecuteParams& execute_params,
   VLOG(5) << "Record ChildCmd " << child_commands_.size() << " commands";
   auto record_fn = [&](se::CommandBuffer* command_buffer) -> absl::Status {
     auto child_record_params = record_params;
-    child_record_params.is_finalize = false;
+    child_record_params.is_finalize = true;
+    child_record_params.executor = &child_commands_;
+    child_record_params.command_buffer = command_buffer;
     return child_commands_.Record(execute_params, child_record_params);
   };
   return HandleCmdCreateOrUpdate(
