@@ -18,12 +18,16 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <tuple>
 
 #include "absl/base/attributes.h"
 #include "absl/log/check.h"
+#include "xla/tsl/lib/gtl/int_type.h"
 
 namespace stream_executor {
+
+TSL_LIB_GTL_DEFINE_INT_TYPE(RawAddressHandle, uint64_t);
 
 // DeviceAddress is an addressable virtual memory region on device. It's backed
 // by a physical memory allocation (which is not directly addressable by the
@@ -44,8 +48,10 @@ class DeviceAddressBase {
   // Default constructor instantiates a null-pointed, zero-sized device address
   // region. An opaque pointer may be provided -- see header for details on the
   // opacity of that pointer.
-  explicit DeviceAddressBase(void* opaque = nullptr, uint64_t size = 0)
-      : opaque_(opaque), size_(size) {
+  explicit DeviceAddressBase(void* opaque = nullptr, uint64_t size = 0,
+                             std::optional<RawAddressHandle> raw_handle =
+                                 std::nullopt)
+      : opaque_(opaque), size_(size), raw_handle_(raw_handle) {
     // TODO(b/336267585): This constructor dangerously encourages
     //                 DeviceAddressBase(mem) which would imply
     //                 DeviceAddressBase(mem, 0)
@@ -87,6 +93,9 @@ class DeviceAddressBase {
   // Sets payload to given value.
   void SetPayload(uint64_t payload) { payload_ = payload; }
 
+  // Returns the raw address handle if available.
+  std::optional<RawAddressHandle> raw_handle() const { return raw_handle_; }
+
   // Returns whether the two DeviceAddressBase segments are identical (both in
   // their opaque pointer and size).
   bool IsSameAs(const DeviceAddressBase& other) const {
@@ -103,13 +112,17 @@ class DeviceAddressBase {
         << ") vs. (" << size_ << ")";
 
     return DeviceAddressBase(
-        reinterpret_cast<std::byte*>(opaque_) + offset_bytes, size_bytes);
+        reinterpret_cast<std::byte*>(opaque_) + offset_bytes, size_bytes,
+        std::nullopt);
   }
 
  private:
   void* opaque_;          // Platform-dependent value representing base address.
   uint64_t size_;         // Size in bytes of this address range.
   uint64_t payload_ = 0;  // Payload data associated with this address.
+  std::optional<RawAddressHandle>
+      raw_handle_;  // Raw address handle if the memory is allocated through
+                    // VMM, not valid if allocated through standard allocator.
 };
 
 // Typed wrapper around "void *"-like DeviceAddressBase.
@@ -120,13 +133,13 @@ template <typename T>
 class DeviceAddress final : public DeviceAddressBase {
  public:
   // Default constructor instantiates a null-pointed, zero-sized addess range.
-  DeviceAddress() : DeviceAddressBase(nullptr, 0) {}
+  DeviceAddress() : DeviceAddressBase(nullptr, 0, std::nullopt) {}
   explicit DeviceAddress(std::nullptr_t) : DeviceAddress() {}
 
   // Typed device address range may be constructed from untyped device address
   // range, this effectively amounts to a cast from a void*.
   explicit DeviceAddress(const DeviceAddressBase& other)
-      : DeviceAddressBase(other.opaque(), other.size()) {
+      : DeviceAddressBase(other.opaque(), other.size(), other.raw_handle()) {
     SetPayload(other.payload());
   }
 
@@ -158,7 +171,7 @@ class DeviceAddress final : public DeviceAddressBase {
   // In order to specify the desire to use byte size instead of element count
   // explicitly, use MakeFromByteSize.
   DeviceAddress(void* opaque, uint64_t size)
-      : DeviceAddressBase(opaque, size) {}
+      : DeviceAddressBase(opaque, size, std::nullopt) {}
 };
 
 }  // namespace stream_executor
