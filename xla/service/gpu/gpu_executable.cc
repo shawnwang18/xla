@@ -313,13 +313,20 @@ GpuExecutable::GpuExecutable(
   set_module_stats(std::move(module_stats));
 
   // Populate command_buffer_allocation_indexes_ with buffer indices accessed by
-  // command buffer thunks.
+  // command buffer thunks. Skip constant allocations since they don't need VA
+  // remapping (they are allocated as global values with fixed addresses).
   if (thunks_) {
     thunks_->ForAllThunks([this](const Thunk* thunk) {
       if (auto* cmd_buffer_thunk =
               dynamic_cast<const CommandBufferThunk*>(thunk)) {
         for (BufferAllocation::Index index :
              cmd_buffer_thunk->allocs_indices()) {
+          // Skip constant allocations - they are allocated as global values
+          // and don't require VA remapping.
+          if (buffer_assignment_ &&
+              buffer_assignment_->GetAllocation(index).is_constant()) {
+            continue;
+          }
           command_buffer_allocation_indexes_.insert(index);
         }
       }
