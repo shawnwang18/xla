@@ -149,7 +149,8 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
 
   TF_ASSIGN_OR_RETURN(
       std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-      GetOrCreateCommandBuffer(params.executor));
+      GetOrCreateCommandBuffer(params.executor,
+                               params.command_buffer_va_range_idx));
   absl::MutexLock lock(cmd_buffer->mutex);
 
   // Initialize commands.
@@ -249,7 +250,7 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
   se::StreamExecutor* executor = params.stream->parent();
   TF_ASSIGN_OR_RETURN(
       std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-      GetOrCreateCommandBuffer(executor));
+      GetOrCreateCommandBuffer(executor, params.command_buffer_va_range_idx));
 
   absl::MutexLock lock(cmd_buffer->mutex);
 
@@ -314,11 +315,17 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 }
 
 absl::StatusOr<std::shared_ptr<CommandBufferThunk::ExecutorCommandBuffer>>
-CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor) {
+CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor,
+                                             int command_buffer_va_range_idx) {
   absl::MutexLock lock(state_->mutex);
 
+  // Key includes both executor and command_buffer_va_range_idx to support
+  // separate command buffers for each VA range index during interleaved
+  // execution.
+  auto key = std::make_pair(executor, command_buffer_va_range_idx);
+
   // Check if command buffer already exists
-  if (auto it = state_->command_buffers.find(executor);
+  if (auto it = state_->command_buffers.find(key);
       it != state_->command_buffers.end()) {
     return it->second;
   }
@@ -328,8 +335,7 @@ CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor) {
       auto command_buffer,
       executor->CreateCommandBuffer(se::CommandBuffer::Mode::kPrimary));
   auto emplaced = state_->command_buffers.emplace(
-      executor,
-      std::make_shared<ExecutorCommandBuffer>(std::move(command_buffer)));
+      key, std::make_shared<ExecutorCommandBuffer>(std::move(command_buffer)));
 
   return emplaced.first->second;
 }

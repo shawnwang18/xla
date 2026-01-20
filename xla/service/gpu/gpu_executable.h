@@ -22,6 +22,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -126,18 +127,22 @@ class GpuExecutable : public Executable {
   };
 
   struct VaRanges {
+    // Mutex to protect VA range operations (map/execute/unmap) for this
+    // executor. This ensures only one thread can use the VA ranges at a time.
+    absl::Mutex mutex;
+
     // Map from allocation index to VA ranges that are reserved for this
     // GpuExecutable, the VA range is bound to the GpuExecutable's
     // allocations, so it will guarantee that multiple calls to GpuExecutable
     // that uses this VA range will have the same VA, which is good for
     // command buffer run because it does not need update.
     absl::flat_hash_map<BufferAllocation::Index, se::DeviceAddressBase>
-        allocation_va_map;
+        allocation_va_map ABSL_GUARDED_BY(mutex);
 
     // Event used to synchronize VA range reuse, when device has completed
     // the task that uses the VA range, it will mark the event, then host
     // knows that its VA range can be remapped to other physical addresses.
-    std::unique_ptr<se::Event> unmap_event;
+    std::unique_ptr<se::Event> unmap_event ABSL_GUARDED_BY(mutex);
   };
 
   static absl::StatusOr<std::unique_ptr<GpuExecutable>> Create(Params params);
@@ -380,7 +385,7 @@ class GpuExecutable : public Executable {
                       std::vector<se::DeviceAddressBase>>
       module_allocations_ ABSL_GUARDED_BY(module_handle_mutex_);
 
-  absl::flat_hash_map<stream_executor::StreamExecutor*,
+  absl::flat_hash_map<std::pair<stream_executor::StreamExecutor*, int>,
                       std::unique_ptr<VaRanges>>
       module_va_ranges_ ABSL_GUARDED_BY(module_handle_mutex_);
 

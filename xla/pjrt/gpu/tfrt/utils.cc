@@ -659,16 +659,16 @@ absl::StatusOr<MaybeOwning<se::DeviceAddressAllocator>> CreateDeviceAllocator(
 
   if (allocator_config.kind == GpuAllocatorConfig::Kind::kVmm) {
     LOG(INFO) << "Using VMM (Virtual Memory Management) allocator.";
-    std::vector<se::StreamExecutor*> executors;
+    std::vector<se::DeviceVirtualAddressAllocator::DeviceInfo> device_infos;
     for (const auto& device : devices) {
       se::StreamExecutor* executor = device->executor();
       if (executor != nullptr) {
-        executors.push_back(executor);
+        device_infos.push_back({executor, device->stream()});
       }
     }
     return MaybeOwning<se::DeviceAddressAllocator>(
         std::make_unique<se::DeviceVirtualAddressAllocator>(
-            xla_client->platform(), executors));
+            xla_client->platform(), device_infos));
   }
 
   std::vector<se::MultiDeviceAdapter::AllocatorInfo> allocators;

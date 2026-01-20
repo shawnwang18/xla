@@ -528,7 +528,8 @@ absl::Status ExecuteThunksImpl(
         &collective_cliques,
         &multimem_registry,
         run_options->run_options().ffi_execution_context(),
-        run_options->local_device_count()};
+        run_options->local_device_count(),
+        run_options->command_buffer_va_range_idx()};
 
     tsl::profiler::TraceMe trace_initialize("Thunks::Initialize");
     TF_RETURN_IF_ERROR(thunk_sequence.Initialize(initialize_params));
@@ -1142,129 +1143,153 @@ absl::Status GpuExecutable::ExecuteThunks(
           << enable_command_buffer_va_remapping;
 
   if (enable_command_buffer_va_remapping) {
-    absl::MutexLock lock(module_handle_mutex_);
+    // Get or create VaRanges for this executor. We hold module_handle_mutex_
+    // briefly just to access/create the VaRanges entry.
+    // The int in the key is the VA range index for interleaving.
+    int command_buffer_va_range_idx =
+        run_options->command_buffer_va_range_idx();
+    VLOG(3) << "device_ordinal=" << executor->device_ordinal()
+            << " ExecuteThunks: command_buffer_va_range_idx="
+            << command_buffer_va_range_idx << " with run_id "
+            << run_options->run_options().run_id().ToInt();
+    auto va_ranges_key = std::make_pair(executor, command_buffer_va_range_idx);
+    VaRanges* va_ranges = nullptr;
+    {
+      absl::MutexLock lock(module_handle_mutex_);
+      // Initialize VA ranges for this executor if not already done.
+      bool need_init =
+          module_va_ranges_.find(va_ranges_key) == module_va_ranges_.end();
 
-    // Initialize VA ranges for this executor if not already done.
-    bool need_init =
-        module_va_ranges_.find(executor) == module_va_ranges_.end();
-    if (need_init) {
-      // Lambda to reserve VA ranges for allocations accessed by command buffer
-      // thunks.
-      auto reserve_command_buffer_va_range =
-          [this](se::StreamExecutor* stream_executor,
-                 const BufferAllocations& buffer_allocations)
-          -> absl::StatusOr<absl::flat_hash_map<BufferAllocation::Index,
-                                                se::DeviceAddressBase>> {
-        absl::flat_hash_map<BufferAllocation::Index, se::DeviceAddressBase>
-            result;
+      if (need_init) {
+        module_va_ranges_[va_ranges_key] = std::make_unique<VaRanges>();
+      }
+      va_ranges = module_va_ranges_[va_ranges_key].get();
+    }
 
-        // Only reserve VA for allocations that are accessed by
-        // CommandBufferThunk.
-        for (BufferAllocation::Index i : command_buffer_allocation_indexes_) {
-          se::DeviceAddressBase device_address =
-              buffer_allocations.GetDeviceAddress(i);
-          const uint64_t size = device_address.size();
+    // Acquire per-executor mutex to protect VA range operations.
+    // This ensures only one thread uses the VA ranges at a time for this
+    // executor.
+    absl::MutexLock va_lock(&va_ranges->mutex);
 
-          // Skip zero-size allocations - no need to reserve VA for them.
-          if (size == 0) {
-            continue;
-          }
+    // Initialize VA ranges if this is first use (allocation_va_map is empty).
+    if (va_ranges->allocation_va_map.empty()) {
+      // Reserve VA ranges for allocations accessed by command buffer thunks.
+      for (BufferAllocation::Index i : command_buffer_allocation_indexes_) {
+        se::DeviceAddressBase device_address =
+            buffer_allocations.GetDeviceAddress(i);
+        const uint64_t size = device_address.size();
 
-          // Reserve virtual address range.
-          TF_ASSIGN_OR_RETURN(se::DeviceAddressBase reserved_address,
-                              stream_executor->ReserveAddress(size));
-          result[i] = reserved_address;
+        // Skip zero-size allocations - no need to reserve VA for them.
+        if (size == 0) {
+          continue;
         }
-        return result;
-      };
 
-      module_va_ranges_[executor] = std::make_unique<VaRanges>();
-      TF_ASSIGN_OR_RETURN(
-          module_va_ranges_[executor]->allocation_va_map,
-          reserve_command_buffer_va_range(executor, buffer_allocations));
-      TF_ASSIGN_OR_RETURN(module_va_ranges_[executor]->unmap_event,
-                          executor->CreateEvent());
+        // Reserve virtual address range.
+        TF_ASSIGN_OR_RETURN(se::DeviceAddressBase reserved_address,
+                            executor->ReserveAddress(size));
+        va_ranges->allocation_va_map[i] = reserved_address;
+      }
+      TF_ASSIGN_OR_RETURN(va_ranges->unmap_event, executor->CreateEvent());
 
       if (VLOG_IS_ON(3)) {
         // Log reserved VA addresses for debugging.
         VLOG(3) << "VA remapping: Reserved "
-                << module_va_ranges_[executor]->allocation_va_map.size()
+                << va_ranges->allocation_va_map.size()
                 << " VA ranges for module " << module_name_;
         for (const auto& [alloc_idx, va_address] :
-             module_va_ranges_[executor]->allocation_va_map) {
+             va_ranges->allocation_va_map) {
           VLOG(3) << "  allocation[" << alloc_idx
                   << "] -> VA: " << va_address.opaque()
                   << " size: " << va_address.size();
         }
       }
-    }
+    } else {
+      // VA range is already initialized, first wait for the unmap event to be
+      // marked and then do the VA unmapping.
+      TF_RETURN_IF_ERROR(va_ranges->unmap_event->Synchronize());
 
-    auto& va_ranges = module_va_ranges_[executor];
-
-    // Lambda to map physical memory to reserved VA addresses.
-    auto map_command_buffer_allocations_to_va =
-        [&va_ranges](se::StreamExecutor* stream_executor,
-                     const BufferAllocations& buffer_allocations)
-        -> absl::StatusOr<BufferAllocations> {
-      const auto& allocation_va_map = va_ranges->allocation_va_map;
-
-      // Create a new vector of buffers, copying from the original allocations.
-      std::vector<se::DeviceAddressBase> mapped_buffers;
-      mapped_buffers.reserve(buffer_allocations.size());
-
-      for (BufferAllocation::Index i = 0;
-           i < static_cast<BufferAllocation::Index>(buffer_allocations.size());
-           ++i) {
-        se::DeviceAddressBase original_buffer =
-            buffer_allocations.GetDeviceAddress(i);
-
-        // Only do VA mapping for allocations accessed by CommandBufferThunk.
-        auto va_it = allocation_va_map.find(i);
-        if (va_it == allocation_va_map.end()) {
-          // Not a command buffer allocation, use the original buffer.
-          mapped_buffers.push_back(original_buffer);
+      // Unmap physical addresses from the reserved VA ranges.
+      for (auto& [alloc_idx, va_address] : va_ranges->allocation_va_map) {
+        if (va_address.is_null()) {
           continue;
         }
-
-        // Get the reserved VA address.
-        se::DeviceAddressBase va_address = va_it->second;
-
-        // Get the raw handle from the original buffer for physical memory
-        // mapping.
-        std::optional<se::RawAddressHandle> raw_handle =
-            original_buffer.raw_handle();
-        if (!raw_handle.has_value()) {
-          return absl::InvalidArgumentError(
-              absl::StrFormat("Buffer allocation %d does not have a raw handle "
-                              "for VA mapping",
-                              i));
-        }
-
-        // Map the physical memory (via raw_handle) to the reserved VA.
-        TF_RETURN_IF_ERROR(stream_executor->MapRawAddress(
-            &va_address, /*offset=*/0, raw_handle.value()));
-
-        VLOG(3) << "Mapped allocation " << i
-                << " physical: " << original_buffer.opaque()
-                << " -> VA: " << va_address.opaque()
-                << " size: " << original_buffer.size();
-
-        // Create a new DeviceAddressBase with VA address and the original raw
-        // handle, so the caller can later unmap and access the physical memory.
-        se::DeviceAddressBase mapped_address(
-            va_address.opaque(), original_buffer.size(), raw_handle.value());
-        mapped_buffers.push_back(mapped_address);
+        TF_RETURN_IF_ERROR(executor->UnmapRawAddress(&va_address));
       }
-
-      return BufferAllocations(mapped_buffers,
-                               buffer_allocations.device_ordinal(),
-                               buffer_allocations.memory_allocator());
-    };
+    }
 
     // Map physical memory to reserved VA addresses.
-    TF_ASSIGN_OR_RETURN(
-        auto remapped_buffer_allocations,
-        map_command_buffer_allocations_to_va(executor, buffer_allocations));
+    std::vector<se::DeviceAddressBase> mapped_buffers;
+    mapped_buffers.reserve(buffer_allocations.size());
+
+    for (BufferAllocation::Index i = 0;
+         i < static_cast<BufferAllocation::Index>(buffer_allocations.size());
+         ++i) {
+      se::DeviceAddressBase original_buffer =
+          buffer_allocations.GetDeviceAddress(i);
+
+      // Only do VA mapping for allocations accessed by CommandBufferThunk.
+      auto va_it = va_ranges->allocation_va_map.find(i);
+      if (va_it == va_ranges->allocation_va_map.end()) {
+        // Not a command buffer allocation, use the original buffer.
+        // This includes zero-size allocations which were skipped during
+        // reservation.
+        mapped_buffers.push_back(original_buffer);
+        continue;
+      }
+
+      // This allocation is used by command buffer - validate it's not null.
+      if (original_buffer.is_null()) {
+        return absl::InternalError(absl::StrFormat(
+            "Command buffer allocation %d has null address", i));
+      }
+
+      // Get the reserved VA address.
+      se::DeviceAddressBase& va_address = va_it->second;
+
+      // Validate VA address is not null.
+      if (va_address.is_null()) {
+        return absl::InternalError(absl::StrFormat(
+            "Reserved VA address for allocation %d is null", i));
+      }
+
+      // Validate sizes match - the reserved VA size must match the buffer size.
+      if (va_address.size() != original_buffer.size()) {
+        return absl::InternalError(absl::StrFormat(
+            "Size mismatch for allocation %d: reserved VA size %zu != buffer "
+            "size %zu",
+            i, va_address.size(), original_buffer.size()));
+      }
+
+      // Get the raw handle from the original buffer for physical memory
+      // mapping.
+      std::optional<se::RawAddressHandle> raw_handle =
+          original_buffer.raw_handle();
+      if (!raw_handle.has_value()) {
+        return absl::InvalidArgumentError(
+            absl::StrFormat("Buffer allocation %d does not have a raw handle "
+                            "for VA mapping",
+                            i));
+      }
+
+      // Map the physical memory (via raw_handle) to the reserved VA.
+      TF_RETURN_IF_ERROR(executor->MapRawAddress(&va_address, /*offset=*/0,
+                                                 raw_handle.value()));
+
+      VLOG(3) << "Mapped allocation " << i
+              << " physical: " << original_buffer.opaque()
+              << " -> VA: " << va_address.opaque()
+              << " size: " << original_buffer.size();
+
+      // Use VA address with the original raw handle for execution, so the
+      // caller can later unmap and access the physical memory.
+      se::DeviceAddressBase mapped_address(
+          va_address.opaque(), original_buffer.size(), raw_handle.value());
+      mapped_buffers.push_back(mapped_address);
+    }
+
+    BufferAllocations remapped_buffer_allocations(
+        mapped_buffers, buffer_allocations.device_ordinal(),
+        buffer_allocations.memory_allocator());
 
     if (VLOG_IS_ON(3)) {
       VLOG(3) << "VA remapping: Mapped " << va_ranges->allocation_va_map.size()
@@ -1290,33 +1315,7 @@ absl::Status GpuExecutable::ExecuteThunks(
     // Wait for execution to complete and unmap.
     TF_RETURN_IF_ERROR(
         run_options->stream()->RecordEvent(va_ranges->unmap_event.get()));
-    TF_RETURN_IF_ERROR(va_ranges->unmap_event->Synchronize());
 
-    // Lambda to unmap physical memory from reserved VA addresses.
-    auto unmap_command_buffer_allocations =
-        [](se::StreamExecutor* stream_executor,
-           absl::flat_hash_map<BufferAllocation::Index, se::DeviceAddressBase>&
-               allocation_va_map) -> absl::Status {
-      for (auto& [index, va_address] : allocation_va_map) {
-        // Skip null buffers.
-        if (va_address.is_null()) {
-          continue;
-        }
-
-        // Unmap the physical memory from the virtual address.
-        TF_RETURN_IF_ERROR(stream_executor->UnmapRawAddress(&va_address));
-
-        VLOG(3) << "Unmapped allocation " << index
-                << " VA: " << va_address.opaque()
-                << " size: " << va_address.size();
-      }
-
-      return absl::OkStatus();
-    };
-
-    TF_RETURN_IF_ERROR(unmap_command_buffer_allocations(
-        executor, va_ranges->allocation_va_map));
-    VLOG(3) << "VA remapping: unmap_command_buffer_allocations completed";
   } else {
     TF_RETURN_IF_ERROR(ExecuteThunksImpl(
         has_module() ? &module_config().debug_options() : nullptr, module_name_,

@@ -18,7 +18,6 @@ limitations under the License.
 #include <cstdint>
 #include <utility>
 
-#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -27,6 +26,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/device_address_allocator.h"
+#include "xla/stream_executor/event.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
@@ -36,16 +36,79 @@ limitations under the License.
 namespace stream_executor {
 
 DeviceVirtualAddressAllocator::DeviceVirtualAddressAllocator(
-    StreamExecutor* executor)
+    StreamExecutor* executor, Stream* stream)
     : DeviceAddressAllocator(executor->GetPlatform()) {
   stream_executors_ = {executor};
+  streams_[executor->device_ordinal()] = stream;
 }
 
 DeviceVirtualAddressAllocator::DeviceVirtualAddressAllocator(
-    const Platform* platform,
-    absl::Span<StreamExecutor* const> stream_executors)
-    : DeviceAddressAllocator(platform),
-      stream_executors_(stream_executors.begin(), stream_executors.end()) {}
+    const Platform* platform, absl::Span<const DeviceInfo> devices)
+    : DeviceAddressAllocator(platform) {
+  stream_executors_.reserve(devices.size());
+  for (const auto& device : devices) {
+    stream_executors_.push_back(device.executor);
+    streams_[device.executor->device_ordinal()] = device.stream;
+  }
+}
+
+DeviceVirtualAddressAllocator::~DeviceVirtualAddressAllocator() {
+  // Process all remaining pending deallocations synchronously.
+  absl::MutexLock lock(&mutex_);
+  for (auto& pending : pending_deallocations_) {
+    // Wait for the event to complete.
+    if (pending.event) {
+      auto status = pending.event->Synchronize();
+      if (!status.ok()) {
+        LOG(WARNING) << "Failed to synchronize event during cleanup: "
+                     << status;
+      }
+    }
+    DoDeallocate(pending.device_ordinal, pending.mem);
+  }
+  pending_deallocations_.clear();
+}
+
+void DeviceVirtualAddressAllocator::ProcessPendingDeallocations() {
+  // Process pending deallocations whose events have completed.
+  while (!pending_deallocations_.empty()) {
+    auto& front = pending_deallocations_.front();
+
+    // Check if the event has completed.
+    if (front.event) {
+      Event::Status status = front.event->PollForStatus();
+      if (status == Event::Status::kPending) {
+        // Not ready yet, stop processing.
+        break;
+      }
+      if (status == Event::Status::kError) {
+        LOG(WARNING) << "Event error while processing pending deallocation";
+      }
+    }
+
+    // Event completed (or no event), perform the actual deallocation.
+    DoDeallocate(front.device_ordinal, front.mem);
+
+    pending_deallocations_.pop_front();
+  }
+}
+
+void DeviceVirtualAddressAllocator::DoDeallocate(int device_ordinal,
+                                                 DeviceAddressBase mem) {
+  auto executor_or = GetStreamExecutor(device_ordinal);
+  if (!executor_or.ok()) {
+    LOG(WARNING) << "Failed to get executor for deallocation: "
+                 << executor_or.status();
+    return;
+  }
+  StreamExecutor* executor = executor_or.value();
+
+  VLOG(3) << absl::StreamFormat(
+      "Actually freeing virtual address %p (size=%uB) on device ordinal %d",
+      mem.opaque(), mem.size(), device_ordinal);
+
+  executor->Deallocate(&mem);
+}
 
 absl::StatusOr<ScopedDeviceAddress<uint8_t>>
 DeviceVirtualAddressAllocator::Allocate(int device_ordinal, uint64_t size,
@@ -59,6 +122,12 @@ DeviceVirtualAddressAllocator::Allocate(int device_ordinal, uint64_t size,
 
   TF_ASSIGN_OR_RETURN(StreamExecutor * executor,
                       GetStreamExecutor(device_ordinal));
+
+  {
+    absl::MutexLock lock(&mutex_);
+    // Process any pending deallocations to potentially reclaim memory.
+    ProcessPendingDeallocations();
+  }
 
   // Use VmmAllocateMemory which handles the full flow: reserve virtual address,
   // allocate physical memory, map, and set access permissions.
@@ -83,12 +152,30 @@ absl::Status DeviceVirtualAddressAllocator::Deallocate(int device_ordinal,
                       GetStreamExecutor(device_ordinal));
 
   VLOG(3) << absl::StreamFormat(
-      "Freeing virtual address %p (size=%uB) on device ordinal %d",
+      "Queueing deferred deallocation for virtual address %p (size=%uB) "
+      "on device ordinal %d",
       mem.opaque(), mem.size(), device_ordinal);
 
-  // StreamExecutor::Deallocate handles VMM memory deallocation internally
-  // (unmap, release physical memory, free virtual address).
-  executor->Deallocate(&mem);
+  // Create an event and record it on the stream.
+  TF_ASSIGN_OR_RETURN(auto event, executor->CreateEvent());
+
+  // Get or create the stream for this device.
+  TF_ASSIGN_OR_RETURN(Stream * stream, GetStream(device_ordinal));
+
+  // Record the event on the stream - deallocation will happen after all
+  // currently enqueued work completes.
+  TF_RETURN_IF_ERROR(stream->RecordEvent(event.get()));
+
+  {
+    absl::MutexLock lock(&mutex_);
+
+    // Also process any already-completed deallocations.
+    ProcessPendingDeallocations();
+
+    // Add this deallocation to the pending queue.
+    pending_deallocations_.push_back(
+        PendingDeallocation{device_ordinal, mem, std::move(event)});
+  }
 
   return absl::OkStatus();
 }
@@ -109,25 +196,17 @@ DeviceVirtualAddressAllocator::GetStreamExecutor(int device_ordinal) const {
                       platform()->Name(), device_ordinal));
 }
 
-bool DeviceVirtualAddressAllocator::AllowsAsynchronousDeallocation() const {
-  return false;
-}
-
 absl::StatusOr<Stream*> DeviceVirtualAddressAllocator::GetStream(
     int device_ordinal) {
-  CHECK(!AllowsAsynchronousDeallocation())
-      << "The logic below only works for synchronous allocators";
-  TF_ASSIGN_OR_RETURN(StreamExecutor * executor,
-                      GetStreamExecutor(device_ordinal));
-  absl::MutexLock lock(&mutex_);
-  if (!streams_.count(device_ordinal)) {
-    TF_ASSIGN_OR_RETURN(auto stream, executor->CreateStream());
-    auto stream_ptr = stream.get();
-    stream_ptr->SetName("DeviceVirtualAddressAllocator");
-    streams_.emplace(device_ordinal, std::move(stream));
-    return stream_ptr;
+  auto it = streams_.find(device_ordinal);
+  if (it == streams_.end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("No stream registered for device ordinal %d. "
+                        "DeviceVirtualAddressAllocator requires streams to be "
+                        "provided at construction time.",
+                        device_ordinal));
   }
-  return streams_.at(device_ordinal).get();
+  return it->second;
 }
 
 }  // namespace stream_executor

@@ -1476,12 +1476,13 @@ GetStreamExecutorGpuDeviceAllocator(
 
     case GpuAllocatorConfig::Kind::kVmm: {
       LOG(INFO) << "Using VMM (Virtual Memory Management) allocator.";
-      std::vector<se::StreamExecutor*> executors;
+      std::vector<se::DeviceVirtualAddressAllocator::DeviceInfo> devices;
       for (const auto& ordinal_and_device : addressable_devices) {
-        executors.push_back(ordinal_and_device.second->executor());
+        devices.push_back({ordinal_and_device.second->executor(),
+                          ordinal_and_device.second->compute_stream()});
       }
-      return std::make_unique<se::DeviceVirtualAddressAllocator>(
-          platform, executors);
+      return std::make_unique<se::DeviceVirtualAddressAllocator>(platform,
+                                                                 devices);
     }
   }
 
