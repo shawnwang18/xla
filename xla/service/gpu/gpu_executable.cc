@@ -119,6 +119,7 @@ limitations under the License.
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/env_time.h"
 #include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/status_macros.h"
 #include "xla/tsl/util/sorted_range.h"
 #include "xla/util.h"
 #include "xla/util/split_proto/split_executable_and_options_writer.h"
@@ -127,7 +128,6 @@ limitations under the License.
 #include "tsl/platform/random.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 #include "tsl/profiler/lib/traceme.h"
-#include "xla/tsl/platform/status_macros.h"
 
 namespace xla {
 namespace gpu {
@@ -181,7 +181,7 @@ class GpuExecutableThunkPassBufferAllocator : public ThunkPassBufferAllocator {
       BufferAllocation::Index start_idx)
       : next_idx_(start_idx) {}
 
-  absl::StatusOr<BufferAllocation* absl_nonnull> NewEmptyAllocation(
+  absl::StatusOr<BufferAllocation * absl_nonnull> NewEmptyAllocation(
       int64_t size) override {
     allocations_.push_back(BufferAllocation(next_idx_++, size, /*color=*/0));
     return &allocations_.back();
@@ -1318,12 +1318,21 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     const ServiceExecutableRunOptions* run_options,
     se::StreamExecutor* executor, int64_t unique_id,
     Thunk::ExecutableSource executable_source, bool block_host_until_done) {
-  // Get or create VaRanges for this executor. We hold va_ranges_mutex_ briefly
-  // just to access/create the VaRanges entry.
+  // Get or create VaRanges for this executor and VA range index. We hold
+  // va_ranges_mutex_ briefly just to access/create the VaRanges entry.
+  // The VA range index allows multiplexing: with kNumOfVaReservationSets=2
+  // reservations, the CPU can remap one range while the GPU executes the other.
+  int command_buffer_va_range_idx =
+      run_options->run_options().command_buffer_va_range_idx();
   VaRanges* va_ranges = nullptr;
   {
     absl::MutexLock lock(&va_ranges_mutex_);
-    va_ranges = &module_va_ranges_[executor];
+    auto va_ranges_key = std::make_pair(executor, command_buffer_va_range_idx);
+    auto [it, inserted] = module_va_ranges_.try_emplace(va_ranges_key);
+    if (inserted) {
+      it->second = std::make_unique<VaRanges>();
+    }
+    va_ranges = it->second.get();
   }
 
   // Get the DeviceAddressVmmAllocator to look up physical allocations.

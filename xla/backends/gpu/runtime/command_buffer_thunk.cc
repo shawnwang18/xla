@@ -31,6 +31,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/command_executor.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/debug_options_flags.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/stream_executor/command_buffer.h"
@@ -70,6 +71,9 @@ CommandBufferThunk::CommandBufferThunk(
           enable_command_buffers_during_profiling),
       enable_command_buffer_va_remapping_(enable_command_buffer_va_remapping),
       state_(std::make_shared<State>()) {
+  enable_command_buffer_va_remapping_ =
+      GetDebugOptionsFromFlags().xla_gpu_enable_command_buffer_va_remapping();
+
   if (VLOG_IS_ON(5)) {
     absl::StatusOr<std::string> graph = commands_.RenderExecutionGraph();
     if (graph.ok()) {
@@ -156,8 +160,10 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
     return absl::OkStatus();
   }
 
-  TF_ASSIGN_OR_RETURN(std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-                      GetOrCreateCommandBuffer(params.executor));
+  TF_ASSIGN_OR_RETURN(
+      std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
+      GetOrCreateCommandBuffer(params.executor,
+                               /*first_alloc_address=*/nullptr));
   absl::MutexLock lock(cmd_buffer->mutex);
 
   // Initialize commands.
@@ -264,8 +270,17 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
   }
 
   se::StreamExecutor* executor = params.stream->parent();
+  // When VA remapping is enabled, distinguish command buffers by VA range using
+  // the first allocation's device address as a key. Different VA ranges have
+  // different base addresses, so each gets its own command buffer recorded once
+  // with fixed VA addresses. Pass nullptr when remapping is disabled.
+  void* first_alloc_address =
+      (enable_command_buffer_va_remapping_ && !allocs_indices().empty())
+          ? params.buffer_allocations->GetDeviceAddress(allocs_indices()[0])
+                .opaque()
+          : nullptr;
   TF_ASSIGN_OR_RETURN(std::shared_ptr<ExecutorCommandBuffer> cmd_buffer,
-                      GetOrCreateCommandBuffer(executor));
+                      GetOrCreateCommandBuffer(executor, first_alloc_address));
 
   absl::MutexLock lock(cmd_buffer->mutex);
 
@@ -303,8 +318,7 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
                                ? "command_buffer::update"
                                : "command_buffer::record_for_va_remapping",
                            {{"device", executor->device_ordinal()},
-                            {"num_commands", commands_.size()},
-                            {"num_executions", cmd_buffer->num_executions}});
+                            {"num_commands", commands_.size()}});
     });
 
     uint64_t start_micros = tsl::Env::Default()->NowMicros();
@@ -341,11 +355,14 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 }
 
 absl::StatusOr<std::shared_ptr<CommandBufferThunk::ExecutorCommandBuffer>>
-CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor) {
+CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor,
+                                             void* first_alloc_address) {
   absl::MutexLock lock(state_->mutex);
 
+  auto key = std::make_pair(executor, first_alloc_address);
+
   // Check if command buffer already exists
-  if (auto it = state_->command_buffers.find(executor);
+  if (auto it = state_->command_buffers.find(key);
       it != state_->command_buffers.end()) {
     return it->second;
   }
@@ -355,8 +372,7 @@ CommandBufferThunk::GetOrCreateCommandBuffer(se::StreamExecutor* executor) {
       auto command_buffer,
       executor->CreateCommandBuffer(se::CommandBuffer::Mode::kPrimary));
   auto emplaced = state_->command_buffers.emplace(
-      executor,
-      std::make_shared<ExecutorCommandBuffer>(std::move(command_buffer)));
+      key, std::make_shared<ExecutorCommandBuffer>(std::move(command_buffer)));
 
   return emplaced.first->second;
 }

@@ -57,6 +57,7 @@ limitations under the License.
 #include "google/protobuf/text_format.h"
 #include "riegeli/bytes/string_reader.h"
 #include "riegeli/bytes/string_writer.h"
+#include <stdlib.h>
 #include "xla/backends/gpu/ffi.h"
 #include "xla/debug_options_flags.h"
 #include "xla/ffi/ffi.h"
@@ -3620,6 +3621,33 @@ INSTANTIATE_TEST_SUITE_P(
     ShardedAutotuningTestInfo::Name);
 
 #if GOOGLE_CUDA
+
+// Creates GpuClientOptions with VMM allocator on device 0.
+GpuClientOptions VmmClientOptions() {
+  GpuClientOptions options;
+  options.allowed_devices = {0};
+  options.allocator_config.kind = GpuAllocatorConfig::Kind::kVmm;
+  return options;
+}
+
+// Creates CompileOptions enabling command buffer VA remapping and all command
+// buffer types. Sets xla_gpu_graph_min_graph_size=1 so even small computations
+// are wrapped in command buffers.
+CompileOptions CmdBufVaRemappingOptions() {
+  CompileOptions opts;
+  auto* dbg = opts.executable_build_options.mutable_debug_options();
+  dbg->set_xla_gpu_enable_command_buffer_va_remapping(true);
+  dbg->set_xla_gpu_graph_min_graph_size(1);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::FUSION);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::CUBLAS);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::CUBLASLT);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::CUDNN);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::CONDITIONAL);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::WHILE);
+  dbg->add_xla_gpu_enable_command_buffer(DebugOptions::DYNAMIC_SLICE_FUSION);
+  return opts;
+}
+
 TEST(StreamExecutorGpuClientTest, VmmAllocatorCanBeSet) {
   GpuClientOptions options;
   options.allocator_config.kind = GpuAllocatorConfig::Kind::kVmm;

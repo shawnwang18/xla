@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
@@ -117,16 +118,21 @@ class CommandBufferThunk : public Thunk {
   };
 
   // Command buffer thunk owns commands buffers instantiated on all executors.
+  // When VA remapping is enabled, the key includes the first allocation's VA
+  // address to distinguish between command buffers for different VA ranges.
   struct State {
     absl::Mutex mutex;
-    absl::flat_hash_map<se::StreamExecutor*,
+    absl::flat_hash_map<std::pair<se::StreamExecutor*, void*>,
                         std::shared_ptr<ExecutorCommandBuffer>>
         command_buffers ABSL_GUARDED_BY(mutex);
   };
 
-  // Returns a command buffer instantiated for `executor` or creates new one.
+  // Returns a command buffer for (executor, first_alloc_address) or creates a
+  // new one. Pass nullptr for first_alloc_address when VA remapping is disabled
+  // or the address is not yet known (e.g. during Initialize).
   absl::StatusOr<std::shared_ptr<ExecutorCommandBuffer>>
-  GetOrCreateCommandBuffer(se::StreamExecutor* executor);
+  GetOrCreateCommandBuffer(se::StreamExecutor* executor,
+                           void* first_alloc_address);
 
   // Each individual command buffer allocates state on device (CUDA graph) and
   // it adds up pretty quickly. To prevent OOM errors we proactively evict

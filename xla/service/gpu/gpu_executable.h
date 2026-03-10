@@ -22,6 +22,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -194,7 +195,7 @@ class GpuExecutable : public Executable {
       const ServiceExecutableRunOptions* run_options,
       VariantArguments arguments);
 
-  absl::Span<const BufferAllocation* absl_nonnull const> GetAllocations()
+  absl::Span<const BufferAllocation * absl_nonnull const> GetAllocations()
       const override {
     return allocation_ptrs_;
   }
