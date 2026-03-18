@@ -181,7 +181,7 @@ class GpuExecutableThunkPassBufferAllocator : public ThunkPassBufferAllocator {
       BufferAllocation::Index start_idx)
       : next_idx_(start_idx) {}
 
-  absl::StatusOr<BufferAllocation * absl_nonnull> NewEmptyAllocation(
+  absl::StatusOr<BufferAllocation* absl_nonnull> NewEmptyAllocation(
       int64_t size) override {
     allocations_.push_back(BufferAllocation(next_idx_++, size, /*color=*/0));
     return &allocations_.back();
@@ -1287,6 +1287,7 @@ absl::Status GpuExecutable::VerboseAllocationError(absl::Status s) {
 // VA remapping execution flow for 2 consecutive calls on the same executor:
 //
 // clang-format off
+// NOLINTBEGIN
 //                                     +-------------------------+                +------------------------+
 // GPU                                 |      Execute Exec1      |                |     Execute Exec2      |
 //                                     +-------------------------+                +------------------------+
@@ -1295,6 +1296,7 @@ absl::Status GpuExecutable::VerboseAllocationError(absl::Status s) {
 //       | + CreateEvent     ||       || +RecordEv|  | (wait GPU)||       ||       || +RecordEv|
 //       | (1st run only)    ||       ||          |  |           ||       ||       ||          |
 //       +-------------------++-------++----------+  +-----------++-------++-------++----------+
+// NOLINTEND
 // clang-format on
 //
 // Submit      = ExecuteThunksImpl() enqueues GPU work; RecordEvent(unmap_event)
@@ -1308,21 +1310,12 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     const ServiceExecutableRunOptions* run_options,
     se::StreamExecutor* executor, int64_t unique_id,
     Thunk::ExecutableSource executable_source, bool block_host_until_done) {
-  // Get or create VaRanges for this executor and VA range index. We hold
-  // va_ranges_mutex_ briefly just to access/create the VaRanges entry.
-  // The VA range index allows multiplexing: with kNumOfVaReservationSets=2
-  // reservations, the CPU can remap one range while the GPU executes the other.
-  int command_buffer_va_range_idx =
-      run_options->run_options().command_buffer_va_range_idx();
+  // Get or create VaRanges for this executor. We hold va_ranges_mutex_ briefly
+  // just to access/create the VaRanges entry.
   VaRanges* va_ranges = nullptr;
   {
     absl::MutexLock lock(&va_ranges_mutex_);
-    auto va_ranges_key = std::make_pair(executor, command_buffer_va_range_idx);
-    auto [it, inserted] = module_va_ranges_.try_emplace(va_ranges_key);
-    if (inserted) {
-      it->second = std::make_unique<VaRanges>();
-    }
-    va_ranges = it->second.get();
+    va_ranges = &module_va_ranges_[executor];
   }
 
   // Get the DeviceAddressVmmAllocator to look up physical allocations.
@@ -1397,6 +1390,10 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     const uint64_t size = buffer_allocations.GetDeviceAddress(idx).size();
     allocation_va_offsets[idx] = current_offset;
     current_offset += round_up_to_granularity(size);
+  }
+
+  if (!allocation_va_offsets.empty() && va_ranges->va_reservation == nullptr) {
+    return Internal("Reserved VA address range is null");
   }
 
   // Map physical memory to reserved VA addresses.

@@ -62,12 +62,14 @@ CommandBufferThunk::ExecutorCommandBuffer::ExecutorCommandBuffer(
 CommandBufferThunk::CommandBufferThunk(
     CommandExecutor commands, ThunkInfo thunk_info,
     std::unique_ptr<SequentialThunk> thunks,
-    bool enable_command_buffers_during_profiling)
+    bool enable_command_buffers_during_profiling,
+    bool enable_command_buffer_va_remapping)
     : Thunk(Thunk::kCommandBuffer, std::move(thunk_info)),
       commands_(std::move(commands)),
       thunks_(std::move(thunks)),
       enable_command_buffers_during_profiling_(
           enable_command_buffers_during_profiling),
+      enable_command_buffer_va_remapping_(enable_command_buffer_va_remapping),
       state_(std::make_shared<State>()) {
   enable_command_buffer_va_remapping_ =
       GetDebugOptionsFromFlags().xla_gpu_enable_command_buffer_va_remapping();
