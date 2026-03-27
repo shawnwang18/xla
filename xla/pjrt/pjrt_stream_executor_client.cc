@@ -1684,19 +1684,24 @@ PjRtStreamExecutorClient::RunAsync(
 // Number of VA reservation sets used for command buffer remapping multiplexing.
 // With 2 sets, one VA range can be remapped by the CPU while the GPU executes
 // commands on the other, enabling CPU/GPU overlap.
-constexpr int kNumOfVaReservationSets = 2;
+int GetNumVaReservationSets() { return 2; }
 
-// Returns the next VA range index for the given device ordinal, round-robining
-// between [0, kNumOfVaReservationSets). Must be computed at lambda scheduling
-// time (not inside the async lambda) so that the scheduling order determines
-// the counter order, keeping all ranks in sync.
-int GetNextCommandBufferVaRangeIdx(int device_ordinal) {
+// Returns the next VA range index for the given executable and device, keyed
+// per executable so each compiled module independently alternates between VA
+// range sets, enabling CPU/GPU overlap regardless of inter-module dispatch
+// order. Must be computed at lambda scheduling time (not inside the async
+// lambda) so that the scheduling order determines the counter order, keeping
+// all ranks in sync.
+int GetNextCommandBufferVaRangeIdx(const void* executable_key,
+                                   int device_ordinal) {
   static absl::Mutex mu;
-  static auto* counters = new absl::flat_hash_map<int, int>();
+  static auto* counters =
+      new absl::flat_hash_map<std::pair<const void*, int>, int>();
   absl::MutexLock lock(&mu);
-  int& idx = (*counters)[device_ordinal];
+  auto key = std::make_pair(executable_key, device_ordinal);
+  int& idx = (*counters)[key];
   int result = idx;
-  idx = (idx + 1) % kNumOfVaReservationSets;
+  idx = (idx + 1) % GetNumVaReservationSets();
   return result;
 }
 
@@ -1760,7 +1765,7 @@ PjRtStreamExecutorRawLoadedExecutable::Execute(
   // Compute the VA range index at scheduling time so the scheduling order
   // determines the counter order, keeping all ranks in sync.
   int command_buffer_va_range_idx =
-      GetNextCommandBufferVaRangeIdx(device_ordinal);
+      GetNextCommandBufferVaRangeIdx(executable_->executable(), device_ordinal);
 
   auto launch_on_device =
       [device_state, gpu_run_options = client_->gpu_run_options(options),

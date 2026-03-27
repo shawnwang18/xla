@@ -78,18 +78,22 @@ namespace {
 using absl::StrCat;
 using absl::StrFormat;
 
-// Number of VA reservation sets used for command buffer remapping multiplexing.
-constexpr int kNumOfVaReservationSets = 2;
+int GetNumVaReservationSets() { return 2; }
 
-// Returns a VA range index for the given device, round-robining between
-// [0, kNumOfVaReservationSets) to enable CPU/GPU overlap during remapping.
-int GetNextCommandBufferVaRangeIdx(int device_ordinal) {
+// Returns the next VA range index for the given executable and device, keyed
+// per executable so each compiled module independently alternates between VA
+// range sets, enabling CPU/GPU overlap regardless of inter-module dispatch
+// order.
+int GetNextCommandBufferVaRangeIdx(const void* executable_key,
+                                   int device_ordinal) {
   static absl::Mutex mu;
-  static auto* counters = new absl::flat_hash_map<int, int>();
+  static auto* counters =
+      new absl::flat_hash_map<std::pair<const void*, int>, int>();
   absl::MutexLock lock(&mu);
-  int& idx = (*counters)[device_ordinal];
+  auto key = std::make_pair(executable_key, device_ordinal);
+  int& idx = (*counters)[key];
   int result = idx;
-  idx = (idx + 1) % kNumOfVaReservationSets;
+  idx = (idx + 1) % GetNumVaReservationSets();
   return result;
 }
 
@@ -380,7 +384,8 @@ absl::StatusOr<GlobalDataHandle> Service::ExecuteAndRegisterResult(
     options.set_device_assignment(device_assignment_ptr);
     options.set_execution_profile(profile);
     options.set_command_buffer_va_range_idx(
-        GetNextCommandBufferVaRangeIdx(stream->parent()->device_ordinal()));
+        GetNextCommandBufferVaRangeIdx(executable,
+                                       stream->parent()->device_ordinal()));
     run_options.emplace_back(options, backend->StreamBorrowerWithPriority());
   }
 

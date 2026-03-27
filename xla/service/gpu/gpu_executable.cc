@@ -181,7 +181,7 @@ class GpuExecutableThunkPassBufferAllocator : public ThunkPassBufferAllocator {
       BufferAllocation::Index start_idx)
       : next_idx_(start_idx) {}
 
-  absl::StatusOr<BufferAllocation* absl_nonnull> NewEmptyAllocation(
+  absl::StatusOr<BufferAllocation * absl_nonnull> NewEmptyAllocation(
       int64_t size) override {
     allocations_.push_back(BufferAllocation(next_idx_++, size, /*color=*/0));
     return &allocations_.back();
@@ -618,12 +618,10 @@ absl::Status ExecuteThunksImpl(
   CollectiveMemoryRequests collective_memory_requests(buffer_allocations);
 
   {  // Prepare thunks for execution and collect requested GPU cliques.
-    Thunk::PrepareParams prepare_params{&collective_params,
-                                        &collective_clique_requests,
-                                        &collective_memory_requests,
-                                        executor,
-                                        &buffer_allocations,
-                                        &execution_scoped_state};
+    Thunk::PrepareParams prepare_params{
+        &collective_params,          &collective_clique_requests,
+        &collective_memory_requests, executor,
+        &buffer_allocations,         &execution_scoped_state};
 
     tsl::profiler::TraceMe trace_prepare("Thunks::Prepare");
     RETURN_IF_ERROR(thunk_executor.Prepare(prepare_params));
@@ -1478,17 +1476,19 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     void* va_base = (va_ranges->va_reservation != nullptr)
                         ? va_ranges->va_reservation->address().opaque()
                         : nullptr;
-    VLOG(3) << "VA remapping: Mapped " << allocation_va_offsets.size()
-            << " allocations to single VA range at " << va_base;
+    XLA_VLOG_DEVICE(3, executor->device_ordinal())
+        << "VA remapping: Mapped " << allocation_va_offsets.size()
+        << " allocations to single VA range at " << va_base;
     for (const auto& [alloc_idx, va_offset] : allocation_va_offsets) {
       se::DeviceAddressBase physical_addr =
           buffer_allocations.GetDeviceAddress(alloc_idx);
       void* va_ptr = reinterpret_cast<void*>(
           reinterpret_cast<uintptr_t>(va_base) + va_offset);
-      VLOG(3) << "  allocation[" << alloc_idx
-              << "] physical: " << physical_addr.opaque()
-              << " -> VA: " << va_ptr << " (offset: " << va_offset << ")"
-              << " size: " << physical_addr.size();
+      XLA_VLOG_DEVICE(3, executor->device_ordinal())
+          << "  allocation[" << alloc_idx
+          << "] physical: " << physical_addr.opaque() << " -> VA: " << va_ptr
+          << " (offset: " << va_offset << ")"
+          << " size: " << physical_addr.size();
     }
   }
 
