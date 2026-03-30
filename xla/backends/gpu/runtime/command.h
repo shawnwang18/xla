@@ -153,6 +153,10 @@ class Command {
     // A flag indicating whether we record commands at command buffer thunk
     // initialization time.
     bool is_initialization = false;
+
+    // The value of xla_gpu_enable_command_buffer_va_remapping for the
+    // enclosing command buffer thunk (0, 1, or 2).
+    int64_t enable_command_buffer_va_remapping = 0;
   };
 
   // Create new commands in the command buffer using the given dependencies.
@@ -209,6 +213,10 @@ class Command {
   // deadlocks. By forcing the command update at thunk initialization time, we
   // ensure that all ranks execute NCCL command update.
   virtual bool requires_initialization() const { return false; }
+
+  // Returns true if this command is implemented via CUDA stream activity
+  // tracing (i.e. a subclass of TracedCommandBufferCmd).
+  virtual bool IsTracedCommand() const { return false; }
 
   // Returns true if command supports loop unroll, the while loop can be
   // unrolled only if it has pre-known trip count and also all commands from the

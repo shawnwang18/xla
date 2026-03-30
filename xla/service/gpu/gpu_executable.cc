@@ -370,25 +370,43 @@ GpuExecutable::GpuExecutable(
   // command buffer thunks. Skip constant and zero-size allocations since they
   // don't need VA remapping (constants are allocated as global values with
   // fixed addresses; zero-size allocations have nothing to map).
+  //
+  // The set of collected indices depends on
+  // xla_gpu_enable_command_buffer_va_remapping:
+  //   0 - collect nothing (VA remapping disabled)
+  //   1 - collect all allocations from all command buffer commands
+  //   2 - collect only allocations from traced commands (TracedCommandBufferCmd
+  //       subclasses) and collective commands (CollectiveCmd subclasses)
   if (thunk_executor_) {
-    CHECK_OK(thunk_executor_->thunks().WalkNested(
-        [this](const Thunk* t) -> absl::Status {
-          auto* cmd_buffer_thunk = dynamic_cast<const CommandBufferThunk*>(t);
-          if (cmd_buffer_thunk == nullptr) {
-            return absl::OkStatus();
-          }
-          for (BufferAllocation::Index index :
-               cmd_buffer_thunk->allocs_indices()) {
-            if (buffer_assignment_) {
-              const auto& alloc = buffer_assignment_->GetAllocation(index);
-              if (alloc.is_constant() || alloc.size() == 0) {
-                continue;
+    int64_t va_remapping =
+        has_module() ? module_config()
+                           .debug_options()
+                           .xla_gpu_enable_command_buffer_va_remapping()
+                     : 0;
+
+    if (va_remapping == 1 || va_remapping == 2) {
+      CHECK_OK(thunk_executor_->thunks().WalkNested(
+          [this, va_remapping](const Thunk* t) -> absl::Status {
+            auto* cbt = dynamic_cast<const CommandBufferThunk*>(t);
+            if (cbt == nullptr) return absl::OkStatus();
+            return cbt->WalkCommands([this, va_remapping](
+                                         const Command* cmd) -> absl::Status {
+              if (va_remapping == 2 && !cmd->IsTracedCommand()) {
+                return absl::OkStatus();
               }
-            }
-            command_buffer_allocation_indexes_.insert(index);
-          }
-          return absl::OkStatus();
-        }));
+              for (const BufferUse& use : cmd->buffer_uses()) {
+                BufferAllocation::Index index = use.slice().index();
+                if (buffer_assignment_) {
+                  const auto& alloc = buffer_assignment_->GetAllocation(index);
+                  if (alloc.is_constant() || alloc.size() == 0) continue;
+                }
+                command_buffer_allocation_indexes_.insert(index);
+              }
+              return absl::OkStatus();
+            });
+          }));
+    }
+    // va_remapping == 0: collect nothing.
   }
 }
 
@@ -1308,12 +1326,21 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     const ServiceExecutableRunOptions* run_options,
     se::StreamExecutor* executor, int64_t unique_id,
     Thunk::ExecutableSource executable_source, bool block_host_until_done) {
-  // Get or create VaRanges for this executor. We hold va_ranges_mutex_ briefly
-  // just to access/create the VaRanges entry.
+  // Get or create VaRanges for this executor and VA range index. We hold
+  // va_ranges_mutex_ briefly just to access/create the VaRanges entry.
+  // The VA range index allows multiplexing: with kNumOfVaReservationSets=2
+  // reservations, the CPU can remap one range while the GPU executes the other.
+  int command_buffer_va_range_idx =
+      run_options->run_options().command_buffer_va_range_idx();
   VaRanges* va_ranges = nullptr;
   {
     absl::MutexLock lock(&va_ranges_mutex_);
-    va_ranges = &module_va_ranges_[executor];
+    auto va_ranges_key = std::make_pair(executor, command_buffer_va_range_idx);
+    auto [it, inserted] = module_va_ranges_.try_emplace(va_ranges_key);
+    if (inserted) {
+      it->second = std::make_unique<VaRanges>();
+    }
+    va_ranges = it->second.get();
   }
 
   // Get the DeviceAddressVmmAllocator to look up physical allocations.
@@ -1586,8 +1613,8 @@ absl::Status GpuExecutable::ExecuteThunks(
   bool enable_command_buffer_va_remapping =
       (command_buffer_allocation_indexes_.size() > 0) && has_module() &&
       module_config()
-          .debug_options()
-          .xla_gpu_enable_command_buffer_va_remapping() &&
+              .debug_options()
+              .xla_gpu_enable_command_buffer_va_remapping() == 1 &&
       dynamic_cast<se::DeviceAddressVmmAllocator*>(memory_allocator) != nullptr;
 
   XLA_VLOG_DEVICE(3, executor->device_ordinal()) << absl::StreamFormat(

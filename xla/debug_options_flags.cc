@@ -502,7 +502,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_print_compilation_stats(false);
 
   opts.set_xla_gpu_enable_pdl(true);
-  opts.set_xla_gpu_enable_command_buffer_va_remapping(false);
+  opts.set_xla_gpu_enable_command_buffer_va_remapping(0);
   return opts;
 }
 
@@ -2981,7 +2981,7 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
                 "Enable PDL (Programmatic Dependent Launch)."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_enable_command_buffer_va_remapping",
-      bool_setter_for(
+      int64_setter_for(
           &DebugOptions::set_xla_gpu_enable_command_buffer_va_remapping),
       debug_options->xla_gpu_enable_command_buffer_va_remapping(),
       "Enable VA remapping for command buffer thunks. When enabled, command "
@@ -3079,8 +3079,7 @@ FlagStatus GetFlagStatus(absl::string_view flag_name) {
           "xla_gpu_all_reduce_combine_threshold_bytes",
           "xla_gpu_autotune_level",
           "xla_gpu_collective_permute_decomposer_threshold",
-          "xla_gpu_cublas_fallback",
-          "xla_gpu_dot_merger_threshold_mb",
+          "xla_gpu_cublas_fallback", "xla_gpu_dot_merger_threshold_mb",
           "xla_gpu_enable_dynamic_slice_fusion",
           "xla_gpu_enable_latency_hiding_scheduler",
           "xla_gpu_enable_pipelined_all_gather",

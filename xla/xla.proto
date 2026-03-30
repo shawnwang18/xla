@@ -544,7 +544,7 @@ message DebugOptions {
   // Enable VA remapping for command buffer thunks. When enabled, command buffer
   // thunks use fixed virtual addresses across executions, allowing the command
   // buffer to be recorded once and replayed without updates.
-  optional bool xla_gpu_enable_command_buffer_va_remapping = 464;
+  optional int64 xla_gpu_enable_command_buffer_va_remapping = 464;
 
   // Enable radix sort using CUB.
   optional bool xla_gpu_enable_cub_radix_sort = 259;

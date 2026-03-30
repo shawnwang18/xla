@@ -63,7 +63,7 @@ CommandBufferThunk::CommandBufferThunk(
     CommandExecutor commands, ThunkInfo thunk_info,
     std::unique_ptr<SequentialThunk> thunks,
     bool enable_command_buffers_during_profiling,
-    bool enable_command_buffer_va_remapping)
+    int64_t enable_command_buffer_va_remapping)
     : Thunk(Thunk::kCommandBuffer, std::move(thunk_info)),
       commands_(std::move(commands)),
       thunks_(std::move(thunks)),
@@ -71,9 +71,6 @@ CommandBufferThunk::CommandBufferThunk(
           enable_command_buffers_during_profiling),
       enable_command_buffer_va_remapping_(enable_command_buffer_va_remapping),
       state_(std::make_shared<State>()) {
-  enable_command_buffer_va_remapping_ =
-      GetDebugOptionsFromFlags().xla_gpu_enable_command_buffer_va_remapping();
-
   if (VLOG_IS_ON(5)) {
     absl::StatusOr<std::string> graph = commands_.RenderExecutionGraph();
     if (graph.ok()) {
@@ -203,20 +200,24 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
       /*additional_compute_streams=*/{}, params.execution_scoped_state,
       /*mock_collectives=*/false);
 
+  if (!cmd_buffer->warmup_done) {
+    return absl::OkStatus();
+  }
+
   // If command buffer is in `kCreate` state it means that command buffer
   // sequence was never recorded into it. We initialize all command buffers
   // before execution, because command buffers when instantiated will allocate
   // memory on device and this might lead to deadlocks when we have concurrent
   // NCCL operations in flight.
-  //
+
   // If commands require initialization (and VA remapping is not enabled), we
   // also record them into the command buffer before execution. This is required
   // to guarantee that collective commands are recorded on all participating
   // ranks to avoid deadlocks.
-  if (cmd_buffer->warmup_done && (cmd_buffer->command_buffer->state() ==
-                                      se::CommandBuffer::State::kCreate ||
-                                  (!enable_command_buffer_va_remapping_ &&
-                                   commands_.requires_initialization()))) {
+  if (cmd_buffer->command_buffer->state() ==
+          se::CommandBuffer::State::kCreate ||
+      (enable_command_buffer_va_remapping_ != 1 &&
+       commands_.requires_initialization())) {
     VLOG(3) << "Initialize command buffer on device #"
             << params.executor->device_ordinal()
             << " by recoding command buffer cmd sequence"
@@ -288,9 +289,9 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
   // Determine whether to (re-)record the command buffer and whether this is a
   // first-time initialization recording (VA remapping path).
   bool is_first_record =
-      enable_command_buffer_va_remapping_ &&
+      enable_command_buffer_va_remapping_ == 1 &&
       cmd_buffer->command_buffer->state() == se::CommandBuffer::State::kCreate;
-  bool needs_update = !enable_command_buffer_va_remapping_ &&
+  bool needs_update = enable_command_buffer_va_remapping_ != 1 &&
                       (!updated_allocs.empty() || commands_.force_update());
 
   if (is_first_record || needs_update) {
@@ -316,7 +317,9 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 
     Command::RecordParams record_params = {
         cmd_buffer->state, std::move(updated_allocs),
-        /*is_initialization=*/is_first_record};
+        /*is_initialization=*/is_first_record,
+        /*enable_command_buffer_va_remapping=*/
+        enable_command_buffer_va_remapping_};
     TF_RETURN_IF_ERROR(commands_.Record(params, record_params,
                                         cmd_buffer->command_buffer.get()));
 
@@ -348,10 +351,34 @@ absl::Status CommandBufferThunk::ExecuteOnStream(const ExecuteParams& params) {
 absl::StatusOr<std::shared_ptr<CommandBufferThunk::ExecutorCommandBuffer>>
 CommandBufferThunk::GetOrCreateCommandBuffer(
     se::StreamExecutor* executor, const BufferAllocations& buffer_allocations) {
-  void* first_alloc_address =
-      (enable_command_buffer_va_remapping_ && !allocs_indices().empty())
-          ? buffer_allocations.GetDeviceAddress(allocs_indices()[0]).opaque()
-          : nullptr;
+  void* first_alloc_address = nullptr;
+  if (enable_command_buffer_va_remapping_ == 1 && !allocs_indices().empty()) {
+    first_alloc_address =
+        buffer_allocations.GetDeviceAddress(allocs_indices()[0]).opaque();
+  } else if (enable_command_buffer_va_remapping_ == 2) {
+    // Find the first command implemented via tracing (IsTracedCommand) and use
+    // its smallest allocation index as the cache key. These commands have their
+    // buffer allocations VA-remapped to fixed addresses, so the first traced
+    // command's first allocation identifies the VA range in use.
+    bool found = false;
+    TF_RETURN_IF_ERROR(
+        commands_.Walk([&](const Command* command) -> absl::Status {
+          if (!found && command->IsTracedCommand()) {
+            found = true;
+            BufferAllocation::Index min_idx = -1;
+            for (const auto& use : command->buffer_uses()) {
+              if (min_idx == -1 || use.slice().index() < min_idx) {
+                min_idx = use.slice().index();
+              }
+            }
+            if (min_idx >= 0) {
+              first_alloc_address =
+                  buffer_allocations.GetDeviceAddress(min_idx).opaque();
+            }
+          }
+          return absl::OkStatus();
+        }));
+  }
   auto key = std::make_pair(executor, first_alloc_address);
   absl::MutexLock lock(state_->mutex);
   // Check if command buffer already exists

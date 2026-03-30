@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef XLA_BACKENDS_GPU_RUNTIME_COMMAND_BUFFER_CMD_EMITTER_H_
 #define XLA_BACKENDS_GPU_RUNTIME_COMMAND_BUFFER_CMD_EMITTER_H_
 
+#include <cstdint>
+
 #include "absl/status/statusor.h"
 #include "xla/backends/gpu/runtime/command_executor.h"
 #include "xla/backends/gpu/runtime/thunk.h"
@@ -27,7 +29,7 @@ struct ConvertToCommandsOptions {
   CommandExecutor::SynchronizationMode synchronization_mode =
       CommandExecutor::SynchronizationMode::kSerialize;
   bool enable_loop_unroll = false;
-  bool enable_command_buffer_va_remapping = false;
+  int64_t enable_command_buffer_va_remapping = 0;
 };
 
 // Converts thunk sequence to a command buffer cmd sequence.

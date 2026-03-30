@@ -30,7 +30,6 @@ limitations under the License.
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/container/node_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -426,7 +425,8 @@ class GpuExecutable : public Executable {
   // Separate mutex for VA ranges to avoid contention with module_handle_mutex_
   // during VA remapping operations which may involve GPU synchronization.
   absl::Mutex va_ranges_mutex_;
-  absl::node_hash_map<stream_executor::StreamExecutor*, VaRanges>
+  absl::flat_hash_map<std::pair<stream_executor::StreamExecutor*, int>,
+                      std::unique_ptr<VaRanges>>
       module_va_ranges_ ABSL_GUARDED_BY(va_ranges_mutex_);
 
   GpuExecutable(const GpuExecutable&) = delete;

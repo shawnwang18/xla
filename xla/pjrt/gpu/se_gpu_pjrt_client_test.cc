@@ -3673,7 +3673,7 @@ GpuClientOptions VmmClientOptions() {
 CompileOptions CmdBufVaRemappingOptions() {
   CompileOptions opts;
   auto* dbg = opts.executable_build_options.mutable_debug_options();
-  dbg->set_xla_gpu_enable_command_buffer_va_remapping(true);
+  dbg->set_xla_gpu_enable_command_buffer_va_remapping(1);
   dbg->set_xla_gpu_graph_min_graph_size(1);
   dbg->add_xla_gpu_enable_command_buffer(DebugOptions::FUSION);
   dbg->add_xla_gpu_enable_command_buffer(DebugOptions::CUBLAS);

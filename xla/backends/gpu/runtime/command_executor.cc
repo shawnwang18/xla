@@ -562,9 +562,19 @@ absl::Status CommandExecutor::RecordUpdate(
       return false;
     }
 
+    Command* command = commands_[id].get();
+
+    // For va_remapping == 2, always skip updates for commands implemented via
+    // tracing (TracedCommandBufferCmd subclasses) or collective operations
+    // (CollectiveCmd subclasses). Their buffer allocations are VA-remapped to
+    // fixed addresses, so no update is needed.
+    if (record_params.enable_command_buffer_va_remapping == 2 &&
+        command->IsTracedCommand()) {
+      return true;
+    }
+
     // We always update commands that require initialization, even if buffer
     // allocations didn't change.
-    Command* command = commands_[id].get();
     if (command->requires_initialization() && record_params.is_initialization) {
       return false;
     }
