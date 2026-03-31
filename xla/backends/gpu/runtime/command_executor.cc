@@ -570,6 +570,8 @@ absl::Status CommandExecutor::RecordUpdate(
     // fixed addresses, so no update is needed.
     if (record_params.enable_command_buffer_va_remapping == 2 &&
         command->IsTracedCommand()) {
+      VLOG(3) << "Skipping update for traced command " << id
+              << " (VA remapping mode 2)";
       return true;
     }
 

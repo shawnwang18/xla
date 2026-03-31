@@ -652,8 +652,8 @@ absl::StatusOr<MaybeOwning<se::DeviceAddressAllocator>> CreateDeviceAllocator(
     LocalClient* xla_client, const GpuAllocatorConfig& allocator_config,
     const std::vector<std::unique_ptr<TfrtGpuDevice>>& devices) {
   GpuAllocatorConfig effective_config = allocator_config;
-  if (GetDebugOptionsFromFlags().xla_gpu_enable_command_buffer_va_remapping() ==
-          1 &&
+  if (GetDebugOptionsFromFlags().xla_gpu_enable_command_buffer_va_remapping() !=
+          0 &&
       effective_config.kind != GpuAllocatorConfig::Kind::kVmm) {
     LOG(WARNING) << "xla_gpu_enable_command_buffer_va_remapping requires the "
                     "VMM allocator. Overriding allocator kind to kVmm.";

@@ -235,9 +235,11 @@ absl::Status CommandBufferThunk::Initialize(const InitializeParams& params) {
     auto updated_allocs =
         cmd_buffer->UpdateBufferAllocations(commands_, execute_params);
 
-    Command::RecordParams record_params = {cmd_buffer->state,
-                                           std::move(updated_allocs),
-                                           /*is_initialization=*/true};
+    Command::RecordParams record_params = {
+        cmd_buffer->state, std::move(updated_allocs),
+        /*is_initialization=*/true,
+        /*enable_command_buffer_va_remapping=*/
+        enable_command_buffer_va_remapping_};
     TF_RETURN_IF_ERROR(commands_.Record(execute_params, record_params,
                                         cmd_buffer->command_buffer.get()));
 

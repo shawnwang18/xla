@@ -405,6 +405,9 @@ GpuExecutable::GpuExecutable(
               return absl::OkStatus();
             });
           }));
+      VLOG(3) << "VA remapping: collected "
+              << command_buffer_allocation_indexes_.size()
+              << " allocation indexes for module " << module_name_;
     }
     // va_remapping == 0: collect nothing.
   }
@@ -1343,6 +1346,11 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
     va_ranges = it->second.get();
   }
 
+  XLA_VLOG_DEVICE(3, executor->device_ordinal())
+      << "VA remapping: module " << module_name_
+      << " va_range_idx=" << command_buffer_va_range_idx
+      << " num_allocations=" << command_buffer_allocation_indexes_.size();
+
   // Get the DeviceAddressVmmAllocator to look up physical allocations.
   // vmm_allocator is guaranteed non-null here because
   // enable_command_buffer_va_remapping already checked for it.
@@ -1614,7 +1622,7 @@ absl::Status GpuExecutable::ExecuteThunks(
       (command_buffer_allocation_indexes_.size() > 0) && has_module() &&
       module_config()
               .debug_options()
-              .xla_gpu_enable_command_buffer_va_remapping() == 1 &&
+              .xla_gpu_enable_command_buffer_va_remapping() != 0 &&
       dynamic_cast<se::DeviceAddressVmmAllocator*>(memory_allocator) != nullptr;
 
   XLA_VLOG_DEVICE(3, executor->device_ordinal()) << absl::StreamFormat(
