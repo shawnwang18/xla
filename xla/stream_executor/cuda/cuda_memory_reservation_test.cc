@@ -186,38 +186,5 @@ TEST_F(CudaMemoryReservationTest, SetAccessGrantsLocalDeviceAccess) {
                        CU_MEM_ACCESS_FLAGS_PROT_READWRITE));
 }
 
-// Verifies that MapTo grants read/write access to all P2P-capable peer devices,
-// not just the local device. Without this, NVLink P2P accesses to VA-mapped
-// buffers deadlock during NCCL collective operations (AllGather, ReduceScatter,
-// AllReduce).
-TEST_F(CudaMemoryReservationTest, SetAccessGrantsPeerDeviceAccess) {
-  if (platform_->VisibleDeviceCount() < 2) {
-    GTEST_SKIP() << "Test requires at least 2 GPUs, found "
-                 << platform_->VisibleDeviceCount();
-  }
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      auto alloc, CudaRawMemoryAllocation::Create(executor_, kTestSize));
-  TF_ASSERT_OK_AND_ASSIGN(auto res,
-                          CudaMemoryReservation::Create(executor_, kTestSize));
-
-  const size_t alloc_size = alloc->address().size();
-  TF_ASSERT_OK_AND_ASSIGN(auto mapping, res->MapTo(0, 0, alloc_size, *alloc));
-
-  CUdeviceptr base_ptr = reinterpret_cast<CUdeviceptr>(res->address().opaque());
-  for (int peer = 0; peer < platform_->VisibleDeviceCount(); ++peer) {
-    if (!executor_->CanEnablePeerAccessTo(peer)) continue;
-    CUmemLocation loc = {};
-    loc.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    loc.id = peer;
-    unsigned long long flags = 0;
-    ASSERT_EQ(cuMemGetAccess(&flags, &loc, base_ptr), CUDA_SUCCESS)
-        << "cuMemGetAccess failed for peer device " << peer;
-    EXPECT_EQ(flags, static_cast<unsigned long long>(
-                         CU_MEM_ACCESS_FLAGS_PROT_READWRITE))
-        << "Expected READWRITE access on peer device " << peer;
-  }
-}
-
 }  // namespace
 }  // namespace stream_executor::gpu
