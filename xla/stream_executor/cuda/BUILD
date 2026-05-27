@@ -1017,6 +1017,7 @@ xla_cc_test(
         ":cuda_memory_reservation",
         ":cuda_platform",
         "//xla/stream_executor:device_address",
+        "//xla/stream_executor:device_address_allocator",
         "//xla/stream_executor:memory_allocation",
         "//xla/stream_executor:memory_reservation",
         "//xla/stream_executor:memory_space",
