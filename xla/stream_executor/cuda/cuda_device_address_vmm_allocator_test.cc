@@ -106,7 +106,7 @@ absl::StatusOr<ScopedDeviceAddress<uint8_t>> AllocateExternalMappedForTest(
                             /*retry_on_failure=*/true,
                             static_cast<int64_t>(MemorySpace::kP2P),
                             reservation, reservation_offset, mapping_size,
-                            /*allocate_va_address=*/false);
+                            /*return_reservation_address=*/true);
 }
 
 absl::StatusOr<ScopedDeviceAddress<uint8_t>> AllocateInternalMappedForTest(
@@ -117,7 +117,7 @@ absl::StatusOr<ScopedDeviceAddress<uint8_t>> AllocateInternalMappedForTest(
                             /*retry_on_failure=*/true,
                             static_cast<int64_t>(MemorySpace::kP2P),
                             reservation, reservation_offset, mapping_size,
-                            /*allocate_va_address=*/true);
+                            /*return_reservation_address=*/false);
 }
 
 class CountingCudaDeviceAddressVmmAllocator
@@ -550,7 +550,7 @@ TEST_F(DeviceAddressVmmAllocatorTest,
 }
 
 TEST_F(DeviceAddressVmmAllocatorTest,
-       InternalMappedAllocateDeallocateAutomaticallyUnMapsReservationAddress) {
+       InternalMappedAllocateRequiresUnMapBeforeDeallocate) {
   const uint64_t granularity = GetVmmGranularity();
   ASSERT_GT(granularity, 0);
   ASSERT_OK_AND_ASSIGN(auto reservation, gpu::CudaMemoryReservation::Create(
@@ -576,14 +576,24 @@ TEST_F(DeviceAddressVmmAllocatorTest,
 
   EXPECT_FALSE(allocator->Deallocate(ordinal, external).ok());
 
+  EXPECT_THAT(allocator->Deallocate(ordinal, addr.cref()),
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition,
+                                     ::testing::HasSubstr("UnMap() first")));
+  EXPECT_EQ(allocator->GetRawAllocation(ordinal, internal), internal_raw);
+  EXPECT_EQ(allocator->GetRawAllocation(ordinal, external), internal_raw);
+
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation.get(),
+                               /*reservation_offset=*/0, granularity),
+              IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, internal), nullptr);
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, external), nullptr);
   ASSERT_THAT(stream_->BlockHostUntilDone(), IsOk());
 }
 
-TEST_F(DeviceAddressVmmAllocatorTest,
-       InternalMappedAllocateDeallocateCanReuseAllocatorAndReservationRecord) {
+TEST_F(
+    DeviceAddressVmmAllocatorTest,
+    InternalMappedAllocateUnMapDeallocateCanReuseAllocatorAndReservationRecord) {
   const uint64_t granularity = GetVmmGranularity();
   ASSERT_GT(granularity, 0);
   ASSERT_OK_AND_ASSIGN(auto reservation, gpu::CudaMemoryReservation::Create(
@@ -602,6 +612,9 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   void* const allocator_va = addr->opaque();
   MemoryAllocation* raw = allocator->GetRawAllocation(ordinal, addr.cref());
   ASSERT_NE(raw, nullptr);
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation.get(),
+                               /*reservation_offset=*/0, granularity),
+              IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
 
   ASSERT_OK_AND_ASSIGN(auto reused,
@@ -612,6 +625,9 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, reused.cref()), raw);
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, external), raw);
 
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation.get(),
+                               /*reservation_offset=*/0, granularity),
+              IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, reused.Release()), IsOk());
   ASSERT_THAT(stream_->BlockHostUntilDone(), IsOk());
 }
@@ -1046,6 +1062,9 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target1), raw);
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target2), nullptr);
 
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation1.get(),
+                               /*reservation_offset=*/0, granularity),
+              IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target1), nullptr);
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target2), nullptr);
@@ -1198,8 +1217,7 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   ASSERT_THAT(stream_->BlockHostUntilDone(), IsOk());
 }
 
-TEST_F(DeviceAddressVmmAllocatorTest,
-       DeallocateAutomaticallyUnMapsActiveMapMapping) {
+TEST_F(DeviceAddressVmmAllocatorTest, DeallocateRejectsActiveMapMapping) {
   const uint64_t granularity = GetVmmGranularity();
   ASSERT_GT(granularity, 0);
   ASSERT_OK_AND_ASSIGN(auto reservation, gpu::CudaMemoryReservation::Create(
@@ -1222,6 +1240,14 @@ TEST_F(DeviceAddressVmmAllocatorTest,
               IsOk());
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target), raw);
 
+  EXPECT_THAT(allocator->Deallocate(ordinal, addr.cref()),
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition,
+                                     ::testing::HasSubstr("UnMap() first")));
+  EXPECT_EQ(allocator->GetRawAllocation(ordinal, target), raw);
+
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation.get(),
+                               /*reservation_offset=*/0, granularity),
+              IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
   EXPECT_EQ(allocator->GetRawAllocation(ordinal, target), nullptr);
   ASSERT_THAT(stream_->BlockHostUntilDone(), IsOk());
@@ -1254,7 +1280,7 @@ TEST_F(DeviceAddressVmmAllocatorTest,
 }
 
 TEST_F(DeviceAddressVmmAllocatorTest,
-       ReusingRegularAllocatorAddressPreservesAutoUnMapPending) {
+       ReusingRegularAllocatorAddressPreservesExplicitUnMapPending) {
   const uint64_t granularity = GetVmmGranularity();
   ASSERT_GT(granularity, 0);
   ASSERT_OK_AND_ASSIGN(auto reservation1, gpu::CudaMemoryReservation::Create(
@@ -1273,6 +1299,9 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   void* const allocator_va = addr->opaque();
   ASSERT_THAT(allocator->Map(ordinal, addr.cref(), reservation1.get(),
                              /*reservation_offset=*/0, granularity),
+              IsOk());
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation1.get(),
+                               /*reservation_offset=*/0, granularity),
               IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
 
@@ -1293,7 +1322,7 @@ TEST_F(DeviceAddressVmmAllocatorTest,
 }
 
 TEST_F(DeviceAddressVmmAllocatorTest,
-       ReusingReservationBackedAllocatorAddressPreservesAutoUnMapPending) {
+       ReusingReservationBackedAllocatorAddressPreservesExplicitUnMapPending) {
   const uint64_t granularity = GetVmmGranularity();
   ASSERT_GT(granularity, 0);
   ASSERT_OK_AND_ASSIGN(
@@ -1315,6 +1344,9 @@ TEST_F(DeviceAddressVmmAllocatorTest,
   void* const allocator_va = addr->opaque();
   ASSERT_THAT(allocator->Map(ordinal, addr.cref(), reservation1.get(),
                              /*reservation_offset=*/0, granularity),
+              IsOk());
+  ASSERT_THAT(allocator->UnMap(ordinal, reservation1.get(),
+                               /*reservation_offset=*/0, granularity),
               IsOk());
   ASSERT_THAT(allocator->Deallocate(ordinal, addr.Release()), IsOk());
 
@@ -1343,21 +1375,21 @@ TEST_F(DeviceAddressVmmAllocatorTest, DestructorLogsDebugStatisticsAtVlog1) {
     absl::SetVLogLevel("vmm_device_address_allocator", old_vlog);
   };
   absl::ScopedMockLog mock_log(absl::MockLogDefault::kIgnoreUnexpected);
-  EXPECT_CALL(
-      mock_log,
-      Log(absl::LogSeverity::kInfo, ::testing::_,
-          ::testing::AllOf(
-              ::testing::HasSubstr(
-                  "DeviceAddressVmmAllocator debug statistics"),
-              ::testing::HasSubstr("| Allocate(size)"),
-              ::testing::HasSubstr(
-                  "| Allocate(..., allocate_va_address=false)"),
-              ::testing::HasSubstr("| Allocate(..., allocate_va_address=true)"),
-              ::testing::HasSubstr("| Map(addr, reservation, ...)"),
-              ::testing::HasSubstr("| Deallocate()"),
-              ::testing::HasSubstr("| UnMap()"),
-              ::testing::HasSubstr("1 (50.00%)"),
-              ::testing::HasSubstr("|         6 |"))))
+  EXPECT_CALL(mock_log,
+              Log(absl::LogSeverity::kInfo, ::testing::_,
+                  ::testing::AllOf(
+                      ::testing::HasSubstr(
+                          "DeviceAddressVmmAllocator debug statistics"),
+                      ::testing::HasSubstr("| Allocate(size)"),
+                      ::testing::HasSubstr(
+                          "| Allocate(..., return_reservation_address=true)"),
+                      ::testing::HasSubstr(
+                          "| Allocate(..., return_reservation_address=false)"),
+                      ::testing::HasSubstr("| Map(addr, reservation, ...)"),
+                      ::testing::HasSubstr("| Deallocate()"),
+                      ::testing::HasSubstr("| UnMap()"),
+                      ::testing::HasSubstr("1 (50.00%)"),
+                      ::testing::HasSubstr("|         6 |"))))
       .Times(1);
   mock_log.StartCapturingLogs();
 
@@ -1424,6 +1456,9 @@ TEST_F(DeviceAddressVmmAllocatorTest, DestructorLogsDebugStatisticsAtVlog1) {
         AllocateInternalMappedForTest(*allocator, ordinal, granularity,
                                       internal_reservation.get(),
                                       /*reservation_offset=*/0, granularity));
+    ASSERT_THAT(allocator->UnMap(ordinal, internal_reservation.get(),
+                                 /*reservation_offset=*/0, granularity),
+                IsOk());
     ASSERT_THAT(allocator->Deallocate(ordinal, internal_mapped.Release()),
                 IsOk());
     ASSERT_OK_AND_ASSIGN(
@@ -1431,6 +1466,9 @@ TEST_F(DeviceAddressVmmAllocatorTest, DestructorLogsDebugStatisticsAtVlog1) {
         AllocateInternalMappedForTest(*allocator, ordinal, granularity,
                                       internal_reservation.get(),
                                       /*reservation_offset=*/0, granularity));
+    ASSERT_THAT(allocator->UnMap(ordinal, internal_reservation.get(),
+                                 /*reservation_offset=*/0, granularity),
+                IsOk());
     ASSERT_THAT(
         allocator->Deallocate(ordinal, reused_internal_mapped.Release()),
         IsOk());
