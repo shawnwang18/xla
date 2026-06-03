@@ -38,7 +38,6 @@ limitations under the License.
 #include "xla/service/buffer_assignment.h"
 #include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/platform.h"
-#include "xla/xla.pb.h"
 
 namespace xla::gpu {
 
@@ -155,10 +154,6 @@ class Command : public Thunk {
     // A flag indicating whether we record commands at command buffer thunk
     // initialization time.
     bool is_initialization = false;
-
-    // The CommandBufferUpdateMode for the enclosing command buffer thunk.
-    DebugOptions::CommandBufferUpdateMode command_buffer_update_mode =
-        DebugOptions::ALWAYS_UPDATE;
   };
 
   // Create new commands in the command buffer using the given dependencies.

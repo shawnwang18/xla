@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -456,17 +457,15 @@ GpuExecutable::GpuExecutable(
   }
   set_module_stats(std::move(module_stats));
 
-  // Populate command_buffer_allocation_indexes_ with buffer indices accessed by
-  // command buffer thunks. Skip constant and zero-size allocations since they
-  // don't need VA remapping (constants are allocated as global values with
-  // fixed addresses; zero-size allocations have nothing to map).
+  // Populate command buffer allocation sets. Skip constant and zero-size
+  // allocations since they don't need VA remapping or update tracking
+  // (constants are allocated as global values with fixed addresses; zero-size
+  // allocations have nothing to map).
   //
-  // The set of collected indices depends on xla_gpu_command_buffer_update_mode:
-  //   ALWAYS_UPDATE - collect nothing (VA remapping disabled)
-  //   NEVER_UPDATE - collect all allocations from all command buffer
-  //     commands
-  //   CAPTURE_CMD_NEVER_UPDATE - collect only allocations from traced
-  //     commands, including collective commands recorded by CollectiveThunk
+  // command_buffer_update_allocation_indexes_ contains all allocation indices
+  // that command buffer update logic might need to check. The
+  // command_buffer_allocation_indexes_ subset contains allocation indices that
+  // are eligible for command-buffer VA remapping.
   if (thunk_executor_) {
     DebugOptions::CommandBufferUpdateMode update_mode =
         has_module() ? module_config()
@@ -481,24 +480,29 @@ GpuExecutable::GpuExecutable(
             auto* cbt = dynamic_cast<const CommandBufferThunk*>(t);
             if (cbt == nullptr) return absl::OkStatus();
             return cbt->WalkCommands([&](const Command* cmd) -> absl::Status {
-              if (update_mode == DebugOptions::CAPTURE_CMD_NEVER_UPDATE &&
-                  !cmd->IsTracedCommand()) {
-                return absl::OkStatus();
-              }
+              bool va_remap_command =
+                  update_mode == DebugOptions::NEVER_UPDATE ||
+                  cmd->IsTracedCommand();
               for (const BufferUse& use : cmd->buffer_uses()) {
                 BufferAllocation::Index index = use.slice().index();
-                if (index >= 0 && index < allocation_ptrs_.size()) {
+                if (index >= 0 &&
+                    static_cast<size_t>(index) < allocation_ptrs_.size()) {
                   const BufferAllocation* alloc = allocation_ptrs_[index];
                   if (alloc->is_constant() || alloc->size() == 0) continue;
                 }
-                command_buffer_allocation_indexes_.insert(index);
+                command_buffer_update_allocation_indexes_.insert(index);
+                if (va_remap_command) {
+                  command_buffer_allocation_indexes_.insert(index);
+                }
               }
               return absl::OkStatus();
             });
           }));
       VLOG(3) << "VA remapping: collected "
               << command_buffer_allocation_indexes_.size()
-              << " allocation indexes for module " << module_name_;
+              << " VA-remap allocation indexes and "
+              << command_buffer_update_allocation_indexes_.size()
+              << " update allocation indexes for module " << module_name_;
     }
     // update_mode == ALWAYS_UPDATE: collect nothing.
   }
@@ -555,7 +559,9 @@ absl::Status GpuExecutable::ExecuteThunksImpl(
     ModuleIdentifier module_id, ThunkExecutor& thunk_executor,
     Thunk::ExecutableSource executable_source,
     const ServiceExecutableRunOptions* run_options,
-    const BufferAllocations& buffer_allocations, bool block_host_until_done,
+    const BufferAllocations& buffer_allocations,
+    const Thunk::CommandBufferUpdateInfo* command_buffer_update_info,
+    bool block_host_until_done,
     GpuExecutable::NumAdditionalStreams num_additional_streams,
     CollectiveMemoryCache& collective_memory_cache,
     bool collective_use_minimal_resource) {
@@ -794,7 +800,8 @@ absl::Status GpuExecutable::ExecuteThunksImpl(
         &scratch_memory,
         run_options->run_options().ffi_execution_context(),
         run_options->local_device_count(),
-        &execution_scoped_state};
+        &execution_scoped_state,
+        command_buffer_update_info};
 
     tsl::profiler::TraceMe trace_initialize("Thunks::Initialize");
     RETURN_IF_ERROR(thunk_executor.Initialize(initialize_params));
@@ -811,10 +818,10 @@ absl::Status GpuExecutable::ExecuteThunksImpl(
 
   // Prepare parameters for thunks execution.
   Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
-      *run_options, buffer_allocations, main_stream,
-      command_buffer_trace_stream, &collective_params, &collective_cliques,
-      &collective_memory, std::move(compute_streams.streams),
-      &execution_scoped_state);
+      *run_options, buffer_allocations, main_stream, command_buffer_trace_stream,
+      &collective_params, &collective_cliques, &collective_memory,
+      std::move(compute_streams.streams), &execution_scoped_state,
+      command_buffer_update_info);
 
   XLA_VLOG_DEVICE(1, run_options->device_ordinal())
       << "Start GpuExecutable::ExecuteOnStream module: " << module_name;
@@ -1643,11 +1650,23 @@ absl::Status GpuExecutable::ExecuteThunksWithVaRemapping(
       mapped_buffers, buffer_allocations.device_ordinal(),
       buffer_allocations.memory_allocator());
 
+  std::vector<BufferAllocation::Index> va_remapped_indices(
+      command_buffer_allocation_indexes_.begin(),
+      command_buffer_allocation_indexes_.end());
+  std::vector<BufferAllocation::Index> dynamic_alloc_indices;
+  absl::c_set_difference(command_buffer_update_allocation_indexes_,
+                         command_buffer_allocation_indexes_,
+                         std::back_inserter(dynamic_alloc_indices));
+  Thunk::CommandBufferUpdateInfo command_buffer_update_info{
+      /*update_policy_ready=*/true, absl::MakeConstSpan(va_remapped_indices),
+      absl::MakeConstSpan(dynamic_alloc_indices)};
+
   // Execute thunks with remapped addresses.
   RETURN_IF_ERROR(ExecuteThunksImpl(
       has_module() ? &module_config().debug_options() : nullptr, module_name_,
       unique_id, *thunk_executor_, executable_source, run_options,
-      remapped_buffer_allocations, block_host_until_done,
+      remapped_buffer_allocations, &command_buffer_update_info,
+      block_host_until_done,
       num_additional_streams_, collective_memory_cache_,
       collective_use_minimal_resource));
 
@@ -1763,8 +1782,9 @@ absl::Status GpuExecutable::ExecuteThunks(
     RETURN_IF_ERROR(ExecuteThunksImpl(
         has_module() ? &module_config().debug_options() : nullptr, module_name_,
         unique_id, *thunk_executor_, executable_source, run_options,
-        buffer_allocations, block_host_until_done, num_additional_streams_,
-        collective_memory_cache_, collective_use_minimal_resource));
+        buffer_allocations, /*command_buffer_update_info=*/nullptr,
+        block_host_until_done, num_additional_streams_, collective_memory_cache_,
+        collective_use_minimal_resource));
   }
   return absl::OkStatus();
 }

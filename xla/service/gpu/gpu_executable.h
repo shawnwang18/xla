@@ -361,7 +361,9 @@ class GpuExecutable : public Executable {
       ModuleIdentifier module_id, ThunkExecutor& thunk_executor,
       Thunk::ExecutableSource executable_source,
       const ServiceExecutableRunOptions* run_options,
-      const BufferAllocations& buffer_allocations, bool block_host_until_done,
+      const BufferAllocations& buffer_allocations,
+      const Thunk::CommandBufferUpdateInfo* command_buffer_update_info,
+      bool block_host_until_done,
       NumAdditionalStreams num_additional_streams,
       CollectiveMemoryCache& collective_memory_cache,
       bool collective_use_minimal_resource);
@@ -469,8 +471,14 @@ class GpuExecutable : public Executable {
   const absl::flat_hash_map<ShapeIndex, OutputInfo> output_info_;
   bool enable_debug_info_manager_;
 
-  // Buffer allocation indices accessed by command buffer thunks. Using
-  // btree_set for deterministic iteration order.
+  // Buffer allocation indices accessed by command buffer thunks that update
+  // logic might need to check. Using btree_set for deterministic iteration
+  // order.
+  absl::btree_set<BufferAllocation::Index>
+      command_buffer_update_allocation_indexes_;
+
+  // Buffer allocation indices that can be VA-remapped for command buffer
+  // execution. This is a subset of command_buffer_update_allocation_indexes_.
   absl::btree_set<BufferAllocation::Index> command_buffer_allocation_indexes_;
 
   // Separate mutex for VA ranges to avoid contention with module_handle_mutex_
