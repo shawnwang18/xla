@@ -48,6 +48,14 @@ CudaDeviceAddressVmmAllocator::CudaDeviceAddressVmmAllocator(
     const Platform* platform)
     : DeviceAddressVmmAllocator(platform) {}
 
+CudaDeviceAddressVmmAllocator::~CudaDeviceAddressVmmAllocator() {
+  absl::Status status = SynchronizeAllPendingOperations();
+  if (!status.ok()) {
+    LOG(FATAL) << "Failed to synchronize pending CUDA VMM deallocations: "
+               << status;
+  }
+}
+
 absl::StatusOr<std::unique_ptr<CudaDeviceAddressVmmAllocator>>
 CudaDeviceAddressVmmAllocator::Create(const Platform* platform,
                                       absl::Span<const DeviceConfig> devices) {
@@ -146,6 +154,8 @@ absl::Status CudaDeviceAddressVmmAllocator::InitializeDeviceState(
   alloc_props.requestedHandleTypes =
       static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_NONE);
   size_t granularity = 0;
+  VLOG(3) << "CUDA VMM cuMemGetAllocationGranularity: device_ordinal="
+          << ordinal << " cu_device=" << cu_device;
   if (auto s = cuda::ToStatus(
           cuMemGetAllocationGranularity(&granularity, &alloc_props,
                                         CU_MEM_ALLOC_GRANULARITY_RECOMMENDED),
@@ -153,6 +163,9 @@ absl::Status CudaDeviceAddressVmmAllocator::InitializeDeviceState(
       !s.ok()) {
     LOG(ERROR) << "Failed to get allocation granularity for device " << ordinal
                << ": " << s;
+  } else {
+    VLOG(3) << "CUDA VMM cuMemGetAllocationGranularity completed: "
+            << "device_ordinal=" << ordinal << " granularity=" << granularity;
   }
 
   state.allocation_granularity = static_cast<uint64_t>(granularity);
