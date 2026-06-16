@@ -32,6 +32,7 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/logical_buffer.h"
@@ -78,6 +79,15 @@ class GpuExecutableBufferAllocator {
 
   using AllocationIndexSet = absl::btree_set<BufferAllocation::Index>;
 
+  struct CommandBufferAllocationIndexes {
+    // Allocation indices that command-buffer update logic might need to check.
+    AllocationIndexSet update;
+
+    // Allocation indices that can be VA-remapped for command-buffer execution.
+    // This is a subset of `update`.
+    AllocationIndexSet va_remapped;
+  };
+
   // Execution-scoped buffer allocation state. Command-buffer VA remapping is
   // inactive when `command_buffer_active()` is false.
   class ExecutionScope {
@@ -114,7 +124,9 @@ class GpuExecutableBufferAllocator {
 
     absl::Status ExecuteWithBufferAllocations(
         const BufferAllocations& owning_buffer_allocations, int device_ordinal,
-        absl::FunctionRef<absl::Status(const BufferAllocations&)> execute);
+        absl::FunctionRef<absl::Status(const BufferAllocations&,
+                                       const Thunk::CommandBufferUpdateInfo*)>
+            execute);
 
    private:
     friend class GpuExecutableBufferAllocator;
@@ -140,6 +152,8 @@ class GpuExecutableBufferAllocator {
         int64_t arg_idx,
         const absl::flat_hash_map<LogicalBuffer::Color, int64_t>&
             allocate_granularity);
+    absl::Status UpdateCommandBufferAllocationPolicy();
+    Thunk::CommandBufferUpdateInfo GetCommandBufferUpdateInfo() const;
     absl::StatusOr<BufferAllocations> BuildExecutionBufferAllocations(
         const BufferAllocations& owning_buffer_allocations, int device_ordinal);
     absl::Status UnmapAliases(int device_ordinal);
@@ -155,7 +169,7 @@ class GpuExecutableBufferAllocator {
     std::vector<MemoryReservationAlias> aliases_to_unmap_;
   };
 
-  static absl::StatusOr<AllocationIndexSet>
+  static absl::StatusOr<CommandBufferAllocationIndexes>
   CollectCommandBufferAllocationIndexes(
       ThunkExecutor* thunk_executor,
       absl::Span<const BufferAllocation* const> allocations,
@@ -171,6 +185,10 @@ class GpuExecutableBufferAllocator {
 
   size_t command_buffer_allocation_count() const {
     return command_buffer_allocation_indexes_.size();
+  }
+
+  const AllocationIndexSet& command_buffer_allocation_indexes() const {
+    return command_buffer_allocation_indexes_;
   }
 
   absl::StatusOr<ExecutionScope> CreateExecutionScope(
@@ -192,6 +210,10 @@ class GpuExecutableBufferAllocator {
         allocation_to_reservation_offset;
     std::unique_ptr<se::MemoryReservation> va_reservation;
     se::DeviceAddressVmmAllocator* vmm_allocator = nullptr;
+    bool update_policy_ready = false;
+    std::vector<BufferAllocation::Index> policy_va_remapped_indices;
+    std::vector<BufferAllocation::Index> policy_dynamic_alloc_indices;
+    AllocationIndexSet policy_va_remapped_index_set;
 
     absl::StatusOr<uint64_t> GetReservationOffset(
         BufferAllocation::Index idx) const;
@@ -203,6 +225,7 @@ class GpuExecutableBufferAllocator {
   const DebugOptions* debug_options_ = nullptr;
   DebugOptions::CommandBufferUpdateMode update_mode_;
   AllocationIndexSet returned_output_allocation_indexes_;
+  AllocationIndexSet command_buffer_update_allocation_indexes_;
   AllocationIndexSet command_buffer_allocation_indexes_;
 
   absl::Mutex remappings_mutex_;
