@@ -2183,10 +2183,9 @@ StreamExecutorGpuClient::RunAsync(
   RETURN_IF_ERROR(allocation_scope.ExecuteWithBufferAllocations(
       buffer_allocations, device_ordinal,
       [&](const gpu::BufferAllocations& execution_buffers,
-          const gpu::Thunk::CommandBufferUpdateInfo*
-              command_buffer_update_info) {
+          const gpu::Thunk::AllocationAddressInfo* allocation_address_info) {
         return gpu_exec->ExecuteThunks(execution_buffers, run_options,
-                                       command_buffer_update_info);
+                                       allocation_address_info);
       }));
 
   RETURN_IF_ERROR(buffer_allocations.TearDown(buffers_in_result,
