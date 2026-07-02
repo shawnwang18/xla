@@ -107,6 +107,15 @@ struct SpmdPartitionerOptions {
   // Enables windowed einsum for result reduce-scatter.
   bool enable_windowed_einsum_for_reduce_scatter = true;
 
+  // Enables a narrow dynamic-slice lowering that broadcasts a single slice
+  // from its sharded owner instead of all-gathering the full operand first.
+  bool enable_dynamic_slice_collective_broadcast = true;
+
+  // Maximum number of partitions for the dynamic-slice collective-broadcast
+  // lowering. The lowering creates one branch with a full replica group per
+  // partition, so this limit bounds quadratic HLO growth.
+  int64_t max_dynamic_slice_collective_broadcast_partitions = 32;
+
   // Enables a narrow dynamic-update-slice lowering that replaces an
   // SPMD-generated all-reduce feeding the update with a collective-reduce to
   // the dynamically selected sharded owner.
@@ -893,6 +902,8 @@ class SpmdPartitioningVisitor : public DfsHloVisitorWithDefault {
   HloInstruction* partition_id_;
 
  private:
+  absl::StatusOr<bool> TryDynamicSliceWithCollectiveBroadcast(
+      HloInstruction* hlo);
   absl::StatusOr<bool> TryDynamicUpdateSliceWithCollectiveReduce(
       HloInstruction* hlo, std::vector<HloInstruction*>& new_indices);
 

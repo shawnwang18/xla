@@ -147,7 +147,8 @@ class CpuOptProvider : public CompiledOptProvider {
 
     auto spmd_partitioner_options =
         spmd::StatefulRngSpmdPartitioner::GetDefaultOptions();
-    // XLA:CPU does not support kCollectiveReduce.
+    // XLA:CPU does not support kCollectiveBroadcast or kCollectiveReduce.
+    spmd_partitioner_options.enable_dynamic_slice_collective_broadcast = false;
     spmd_partitioner_options.enable_dynamic_update_slice_collective_reduce =
         false;
     RegisterPass<spmd::StatefulRngSpmdPartitioner>(
