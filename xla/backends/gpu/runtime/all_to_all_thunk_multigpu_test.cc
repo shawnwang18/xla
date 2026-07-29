@@ -30,13 +30,16 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/all_to_all_thunk.h"
 #include "xla/backends/gpu/runtime/collective_thunk.h"
 #include "xla/backends/gpu/runtime/collective_thunk_multigpu_test_utils.h"
+#include "xla/backends/gpu/runtime/command.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/computation_placer.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/shaped_slice.h"
 #include "xla/shape_util.h"
+#include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/gpu/gpu_command_buffer.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/xla_data.pb.h"
 
@@ -185,6 +188,16 @@ static absl::Status SetupDeviceSlot(int device_ordinal, DeviceTestSlot& slot,
                                     thunk, device_assignment, slot);
 }
 
+static absl::Status SetupDeviceSlot(int device_ordinal, DeviceTestSlot& slot,
+                                    AllToAllThunk& first_thunk,
+                                    AllToAllThunk& second_thunk,
+                                    const DeviceAssignment& device_assignment) {
+  std::vector<int64_t> buffer_sizes = DeviceBufferSizes();
+  return SetupCollectiveThunksDevice(device_ordinal, kNumDevices, buffer_sizes,
+                                     {&first_thunk, &second_thunk},
+                                     device_assignment, slot);
+}
+
 static absl::Status RunExecuteOnStreamPhase(DeviceTestSlot& slot,
                                             AllToAllThunk& thunk,
                                             int device_ordinal, int phase) {
@@ -216,6 +229,72 @@ static absl::Status RunCreatePhase(DeviceTestSlot& slot, AllToAllThunk& thunk,
       *slot.stream, DestinationBuffers(slot.create_buffers), -1.0f));
 
   RETURN_IF_ERROR(RecordCommandBufferCreate(slot, thunk, execute_params));
+  RETURN_IF_ERROR(SubmitCommandBuffer(slot));
+  return VerifyOutput(*slot.stream, DestinationBuffers(slot.create_buffers),
+                      device_ordinal, phase);
+}
+
+static absl::Status RunPersistentCreatePhase(DeviceTestSlot& slot,
+                                             AllToAllThunk& first_thunk,
+                                             AllToAllThunk& second_thunk,
+                                             int device_ordinal, int phase) {
+  RETURN_IF_ERROR(
+      PrepareInputs(*slot.stream, slot.create_buffers, device_ordinal, phase));
+
+  BufferAllocations allocations =
+      MakeBufferAllocations(slot, slot.create_buffers);
+  Thunk::ExecuteParams execute_params = MakeExecuteParams(slot, allocations);
+
+  // Warm up both NCCL commands outside stream capture, then clear their output
+  // so that the command buffer is responsible for the verified result.
+  RETURN_IF_ERROR(ExecuteOnStreamAndBlock(first_thunk, execute_params));
+  RETURN_IF_ERROR(ExecuteOnStreamAndBlock(second_thunk, execute_params));
+  RETURN_IF_ERROR(FillDestinationBuffers(
+      *slot.stream, DestinationBuffers(slot.create_buffers), -1.0f));
+
+  // Mark every buffer used by both collectives persistent. Recording two
+  // distinct commands into one parent graph exercises repeated collective
+  // capture while preserving their execution order.
+  std::vector<BufferAllocation::Index> persistent_alloc_indices =
+      AllAllocationIndices();
+  execute_params.persistent_alloc_indices =
+      absl::MakeConstSpan(persistent_alloc_indices);
+
+  ASSIGN_OR_RETURN(slot.command_buffer, slot.executor->CreateCommandBuffer(
+                                            se::CommandBuffer::Mode::kPrimary));
+
+  Command::RecordParams record_params = {slot.state_manager};
+  ASSIGN_OR_RETURN(
+      const se::CommandBuffer::Command* first_command,
+      first_thunk.Record(execute_params, record_params,
+                         Command::RecordCreate{/*dependencies=*/{}},
+                         slot.command_buffer.get()));
+  if (first_command == nullptr) {
+    return absl::InternalError(
+        "First AllToAllThunk returned a null command node");
+  }
+  if (dynamic_cast<const se::gpu::GpuCommandBuffer::GpuChildCommand*>(
+          first_command) == nullptr) {
+    return absl::InternalError(
+        "Persistent AllToAllThunk must be recorded as a child command");
+  }
+
+  std::vector<const se::CommandBuffer::Command*> dependencies = {first_command};
+  ASSIGN_OR_RETURN(slot.command,
+                   second_thunk.Record(execute_params, record_params,
+                                       Command::RecordCreate{dependencies},
+                                       slot.command_buffer.get()));
+  if (slot.command == nullptr) {
+    return absl::InternalError(
+        "Second AllToAllThunk returned a null command node");
+  }
+  if (dynamic_cast<const se::gpu::GpuCommandBuffer::GpuChildCommand*>(
+          slot.command) == nullptr) {
+    return absl::InternalError(
+        "Persistent AllToAllThunk must be recorded as a child command");
+  }
+
+  RETURN_IF_ERROR(slot.command_buffer->Finalize());
   RETURN_IF_ERROR(SubmitCommandBuffer(slot));
   return VerifyOutput(*slot.stream, DestinationBuffers(slot.create_buffers),
                       device_ordinal, phase);
@@ -275,6 +354,30 @@ TEST(AllToAllThunkMultiGpuTest, RecordCommandBufferCreate) {
         RETURN_IF_ERROR(SetupDeviceSlot(d, slots[d], thunk, device_assignment));
         return RunCreatePhase(slots[d], thunk, d,
                               /*phase=*/2);
+      }));
+}
+
+TEST(AllToAllThunkMultiGpuTest, RecordMultiplePersistentCommands) {
+  if (!HasEnoughGpus(kNumDevices)) {
+    GTEST_SKIP() << "Test requires at least " << kNumDevices << " GPUs";
+  }
+  if (!IsAtLeastCuda12900(GetGpuExecutor(0))) {
+    GTEST_SKIP() << "Child command nodes require CUDA 12.9+";
+  }
+
+  DeviceAssignment device_assignment = MakeDeviceAssignment(kNumDevices);
+  std::vector<BufferAllocation> buffer_allocations =
+      MakeThunkBufferAllocations();
+  AllToAllThunk first_thunk = MakeThunk(buffer_allocations);
+  AllToAllThunk second_thunk = MakeThunk(buffer_allocations);
+  std::vector<DeviceTestSlot> slots(kNumDevices);
+
+  ASSERT_OK(RunOnDevices(
+      kNumDevices, "alltoall_persistent_create", [&](int d) -> absl::Status {
+        RETURN_IF_ERROR(SetupDeviceSlot(d, slots[d], first_thunk, second_thunk,
+                                        device_assignment));
+        return RunPersistentCreatePhase(slots[d], first_thunk, second_thunk, d,
+                                        /*phase=*/4);
       }));
 }
 
