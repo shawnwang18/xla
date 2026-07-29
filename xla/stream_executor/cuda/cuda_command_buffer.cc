@@ -811,9 +811,10 @@ CudaCommandBuffer::CreateTracedNodes(
     const CUgraphNode* capture_deps = nullptr;
     size_t num_capture_deps = 0;
     RETURN_IF_ERROR(cuda::ToStatus(
-        cuStreamGetCaptureInfo(capture_stream->stream_handle(), &capture_status,
-                               /*id_out=*/nullptr, /*graph_out=*/nullptr,
-                               &capture_deps, &num_capture_deps),
+        cuStreamGetCaptureInfo_v2(
+            capture_stream->stream_handle(), &capture_status,
+            /*id_out=*/nullptr, /*graph_out=*/nullptr, &capture_deps,
+            &num_capture_deps),
         "Failed to get capture info for a traced region"));
     leaf_nodes.assign(capture_deps, capture_deps + num_capture_deps);
 
