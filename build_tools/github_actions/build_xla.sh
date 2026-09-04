@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Copyright 2023 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-
 echo "XLA run_hlo_module script is running..."
 
 # Build run_hlo_module
@@ -37,8 +35,6 @@ bazel run -c opt xla/tools:run_hlo_module -- \
     --iterations=$num_iterations \
     --reference_platform= \
     xla/tools/data/benchmarking/mobilenet_v2.hlo
-# add sleep to test base vs PR
-sleep 60  # TODO(b/277240370): remove this
 run_end_time="$(date +%s)"
 echo "run_hlo_module execution end time: ${run_end_time}"
 runtime="$((run_end_time - run_start_time))"
