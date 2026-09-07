@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ limitations under the License.
 #include <sys/types.h>
 
 #include <limits>
+#include <vector>
 
+#include "absl/status/status_macros.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -34,17 +36,21 @@ limitations under the License.
 
 namespace xla {
 
-StatusOr<bool> ReduceScatterDecomposer::Run(
-    HloModule *module,
-    const absl::flat_hash_set<absl::string_view> &execution_threads) {
+absl::StatusOr<bool> ReduceScatterDecomposer::RunImpl(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
   int64_t next_channel_id = hlo_query::NextChannelId(*module);
 
-  for (HloComputation *computation :
+  for (HloComputation* computation :
        module->MakeNonfusionComputations(execution_threads)) {
-    for (HloInstruction *instruction :
+    if (computation->IsAsyncComputation()) {
+      // TODO: b/501070020 - Support async reduce-scatter.
+      continue;
+    }
+    for (HloInstruction* instruction :
          computation->MakeInstructionPostOrder()) {
-      auto *rs = DynCast<HloReduceScatterInstruction>(instruction);
+      auto* rs = DynCast<HloReduceScatterInstruction>(instruction);
       if (!rs || !rs->shape().IsArray()) {
         continue;
       }
@@ -53,31 +59,38 @@ StatusOr<bool> ReduceScatterDecomposer::Run(
       if (rs->channel_id()) {
         channel_id = next_channel_id++;
       }
+      if (should_decompose_ && !should_decompose_(rs)) {
+        continue;
+      }
 
+      VLOG(2) << "Decompose: " << rs->ToString();
       // Create an all-reduce
-      HloInstruction *ar =
+      HloComputation* apply_clone = module->AddComputationAndUnifyNamesAndIds(
+          rs->to_apply()->Clone(), /*is_entry=*/false);
+      HloInstruction* ar =
           computation->AddInstruction(HloInstruction::CreateAllReduce(
-              rs->operand(0)->shape(), rs->operands(), rs->to_apply(),
-              rs->replica_groups(), rs->constrain_layout(), channel_id,
+              rs->operand(0)->shape(), rs->operands(), apply_clone,
+              rs->device_list(), rs->constrain_layout(), channel_id,
               rs->use_global_device_ids()));
+      ar->set_frontend_attributes(rs->frontend_attributes());
+
       // Create start indices for a dynamic slice to decompose the all-reduce
       // results.
-      TF_ASSIGN_OR_RETURN(
-          CollectiveOpGroupMode group_mode,
-          GetCollectiveOpGroupMode(rs->channel_id().has_value(),
-                                   rs->use_global_device_ids()));
-      TF_ASSIGN_OR_RETURN(
-          std::vector<HloInstruction *> start_indices,
+      ABSL_ASSIGN_OR_RETURN(CollectiveOpGroupMode group_mode,
+                       GetCollectiveOpGroupMode(rs->channel_id().has_value(),
+                                                rs->use_global_device_ids()));
+      ABSL_ASSIGN_OR_RETURN(
+          std::vector<HloInstruction*> start_indices,
           CreateStartIndicesForCollectiveDecomposition(
               group_mode, rs->replica_groups(), rs->shape(),
               rs->scatter_dimension(), computation, update_layout_));
 
-      HloInstruction *ds =
+      HloInstruction* ds =
           computation->AddInstruction(HloInstruction::CreateDynamicSlice(
               rs->shape(), ar, start_indices, rs->shape().dimensions()));
 
-      TF_RETURN_IF_ERROR(rs->ReplaceAllUsesWith(ds));
-      TF_RETURN_IF_ERROR(computation->RemoveInstruction(rs));
+      ABSL_RETURN_IF_ERROR(rs->ReplaceAllUsesWith(ds));
+      ABSL_RETURN_IF_ERROR(computation->RemoveInstruction(rs));
       changed = true;
     }
   }

@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,121 +16,127 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_HLO_FUSION_ANALYSIS_H_
 #define XLA_SERVICE_GPU_HLO_FUSION_ANALYSIS_H_
 
+#include <cstdint>
+#include <memory>
 #include <optional>
-#include <utility>
-#include <vector>
 
-#include "xla/hlo/ir/hlo_computation.h"
+#include "absl/log/check.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/codegen/hlo_fusion_spec.h"
+#include "xla/codegen/ir_emission_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/service/gpu/backend_configs.pb.h"
-#include "xla/service/gpu/gpu_device_info.h"
-#include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/ir_emission_utils.h"
-#include "xla/service/gpu/kernel_mapping_scheme.h"
-#include "xla/service/gpu/launch_dimensions.h"
-#include "xla/service/gpu/reduction_utils.h"
-#include "xla/statusor.h"
+#include "xla/shape.h"
 #include "xla/stream_executor/device_description.h"
 
 namespace xla {
 namespace gpu {
+
+// Returns true if the instruction's fusion backend config kind matches the
+// given one.
+bool IsGpuFusionKind(const HloInstruction& hlo, absl::string_view kind);
 
 class HloFusionAnalysis {
  public:
   // The type of emitted fusion.
   enum class EmitterFusionKind {
     kLoop,
+    kCustomFusion,
     kTriton,
     kReduction,
     kTranspose,
-    kInputSlices,
+    kConcatenate,
     kScatter,
+    kCuDnn,
+    kSort,
   };
 
-  static StatusOr<HloFusionAnalysis> Create(
-      FusionBackendConfig backend_config,
-      std::vector<const HloInstruction*> hlo_roots,
-      FusionBoundaryFn boundary_fn, const GpuDeviceInfo* device_info);
-  static StatusOr<HloFusionAnalysis> Create(const HloFusionInstruction* fusion,
-                                            const GpuDeviceInfo* device_info);
+  // Precomputed information about inputs (arguments) and outputs (roots) of the
+  // fusion.
+  struct InputOutputInfo {
+    int smallest_input_dtype_bits;
+    int smallest_output_dtype_bits;
+  };
 
-  const std::vector<const HloInstruction*>& fusion_roots() const {
-    return fusion_roots_;
+  static HloFusionAnalysis Create(FusionBackendConfig backend_config,
+                                  std::unique_ptr<HloFusionAdaptor> fusion,
+                                  const se::DeviceDescription* device_info);
+
+  // Creates a HloFusionAnalysis that analyzes just instruction as a standalone
+  // fusion.
+  static HloFusionAnalysis Create(const HloInstruction& instruction,
+                                  const se::DeviceDescription& device_info);
+
+  // Creates a HloFusionAnalysis that analyzes a hypothetical fusion of producer
+  // into consumer.
+  static HloFusionAnalysis Create(const HloInstruction& producer,
+                                  const HloInstruction& consumer,
+                                  const se::DeviceDescription& device_info);
+
+  const HloFusionAdaptor& fusion() const { return fusion_spec_.fusion(); }
+  const HloFusionSpec& fusion_spec() const { return fusion_spec_; }
+
+  absl::Span<const HloInstructionAdaptor> fusion_roots() const {
+    return fusion_spec_.fusion_roots();
   }
-  const FusionBoundaryFn& fusion_boundary() const {
-    return fusion_boundary_fn_;
+  HloInstructionAdaptor fusion_root(int64_t i) const {
+    return fusion_spec_.fusion_root(i);
+  }
+  int64_t fusion_root_count() const { return fusion_spec_.fusion_root_count(); }
+
+  absl::Span<const HloInstructionAdaptor> fusion_heroes() const {
+    return fusion_spec_.fusion_heroes();
+  }
+  HloInstructionAdaptor fusion_hero(int64_t i) const {
+    return fusion_spec_.fusion_hero(i);
   }
 
-  // Determines the fusion type for the emitter.
-  EmitterFusionKind GetEmitterFusionKind() const;
-
-  // Determines the launch dimensions for the fusion. The fusion kind must not
-  // be `kTriton`.
-  StatusOr<LaunchDimensions> GetLaunchDimensions();
-
-  // Calculates the reduction information. Returns `nullptr` if the fusion is
-  // not a reduction.
-  const ReductionCodegenInfo* GetReductionCodegenInfo();
-
-  // Calculates the transpose tiling information. Returns `nullptr` if the
-  // fusion is not a transpose.
-  const TilingScheme* GetTransposeTilingScheme();
-
-  // Calculates the loop fusion config. Returns `nullptr` if the fusion is not a
-  // loop.
-  const LaunchDimensionsConfig* GetLoopFusionConfig();
+  EmitterFusionKind emitter_fusion_kind() const { return emitter_fusion_kind_; }
 
   // Returns the hero reduction of the computation.
   const HloInstruction* FindHeroReduction() const;
 
+  const se::DeviceDescription& device_info() const { return *device_info_; }
+
+  const FusionBackendConfig& fusion_backend_config() const {
+    return fusion_backend_config_;
+  }
+
+  // Returns the shape of the first result.
+  const Shape& first_result_shape() const;
+
+  // Returns the tiled transpose description. Requires that emitter_fusion_kind_
+  // is kTranspose.
+  const TransposeDescription& tiled_transpose() const {
+    CHECK(tiled_transpose_.has_value());
+    return *tiled_transpose_;
+  }
+
+  const InputOutputInfo& input_output_info() const {
+    return input_output_info_;
+  }
+
  private:
   HloFusionAnalysis(FusionBackendConfig fusion_backend_config,
-                    std::vector<const HloInstruction*> fusion_roots,
-                    FusionBoundaryFn fusion_boundary_fn,
-                    std::vector<const HloInstruction*> fusion_parameters,
-                    std::vector<const HloInstruction*> fusion_heroes,
-                    const GpuDeviceInfo* device_info,
-                    std::optional<TransposeDescription> tiled_transpose)
-      : fusion_backend_config_(std::move(fusion_backend_config)),
-        fusion_roots_(std::move(fusion_roots)),
-        fusion_boundary_fn_(std::move(fusion_boundary_fn)),
-        fusion_parameter_inputs_(std::move(fusion_parameters)),
-        fusion_heroes_(std::move(fusion_heroes)),
-        device_info_(device_info),
-        tiled_transpose_(tiled_transpose) {}
+                    HloFusionSpec fusion_spec,
+                    EmitterFusionKind emitter_fusion_kind,
+                    const se::DeviceDescription* device_info,
+                    std::optional<TransposeDescription> tiled_transpose,
+                    InputOutputInfo input_output_info);
 
-  const Shape& GetElementShape() const;
-  int SmallestInputDtypeBits() const;
-  int64_t MaxBeneficialColumnReductionUnrollBasedOnBlockSize() const;
-  std::vector<std::vector<const HloInstruction*>> GroupDisjointReductions()
-      const;
-  bool IsUnrollingColumnReductionBeneficial(const Shape& input_shape,
-                                            int64_t num_kept_minor,
-                                            bool reduction_is_race_free) const;
-  bool CanVectorizeReduction(const ReductionDimensions& reduction_dimensions,
-                             int num_threads_x, Vector3 reduction_tiling,
-                             const Shape& input_shape,
-                             bool reduction_is_race_free) const;
-  int CalculateVirtualThreadScalingFactorForReduction(
-      const ReductionDimensions& reduction_dimensions) const;
-  ReductionCodegenInfo ComputeReductionCodegenInfo(
-      const HloInstruction* hero_reduction) const;
   bool HasConsistentTransposeHeros() const;
 
   FusionBackendConfig fusion_backend_config_;
-  std::vector<const HloInstruction*> fusion_roots_;
-  FusionBoundaryFn fusion_boundary_fn_;
-  // The HLO instructions that are inputs into the fusion. These instructions
-  // are /outside/ the fusion.
-  std::vector<const HloInstruction*> fusion_parameter_inputs_;
-  std::vector<const HloInstruction*> fusion_heroes_;
-  const GpuDeviceInfo* device_info_;
-  std::optional<TransposeDescription> tiled_transpose_;
 
-  std::optional<ReductionCodegenInfo> reduction_codegen_info_;
-  std::optional<TilingScheme> transpose_tiling_scheme_;
-  std::optional<LaunchDimensionsConfig> loop_fusion_config_;
+  HloFusionSpec fusion_spec_;
+  EmitterFusionKind emitter_fusion_kind_;
+
+  const se::DeviceDescription* device_info_;
+  std::optional<TransposeDescription> tiled_transpose_;
+  InputOutputInfo input_output_info_;
 };
 
 }  // namespace gpu

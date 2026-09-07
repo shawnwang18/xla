@@ -1,4 +1,4 @@
-# Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2023 The OpenXLA Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,22 +13,12 @@
 # limitations under the License.
 # ============================================================================
 
-load(
-    "//xla:pytype.default.bzl",
-    "pytype_strict_binary",
-    "pytype_strict_library",
-)
-# Placeholder: load py_test
+load("@xla//third_party/rules_python/python:py_test.bzl", "py_test")
+load("//xla:pytype.bzl", "pytype_strict_binary", "pytype_strict_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
-)
-
-pytype_strict_binary(
-    name = "clang_tidy",
-    srcs = ["clang_tidy.py"],
-    deps = [":diff_parser"],
 )
 
 pytype_strict_library(
@@ -38,9 +28,19 @@ pytype_strict_library(
 )
 
 pytype_strict_library(
+    name = "check_header_guards",
+    srcs = ["check_header_guards.py"],
+)
+
+pytype_strict_library(
     name = "diff_parser",
     srcs = ["diff_parser.py"],
     visibility = ["//visibility:public"],
+)
+
+pytype_strict_library(
+    name = "generate_compile_commands",
+    srcs = ["generate_compile_commands.py"],
 )
 
 py_test(
@@ -50,9 +50,10 @@ py_test(
         "testdata/bad_cc.diff",
         "testdata/important_cc.diff",
     ],
-    tags = ["no_oss"],
     deps = [
         ":check_contents",
+        ":diff_parser",
+        "//build_tools:test_utils",
         "@absl_py//absl/testing:absltest",
     ],
 )
@@ -65,9 +66,32 @@ py_test(
         "testdata/crosstool.diff",
         "testdata/important_cc.diff",
     ],
-    tags = ["no_oss"],
     deps = [
         ":diff_parser",
+        "//build_tools:test_utils",
         "@absl_py//absl/testing:absltest",
     ],
+)
+
+py_test(
+    name = "generate_compile_commands_test",
+    srcs = ["generate_compile_commands_test.py"],
+    deps = [
+        ":generate_compile_commands",
+        "@absl_py//absl/testing:absltest",
+    ],
+)
+
+py_test(
+    name = "check_header_guards_test",
+    srcs = ["check_header_guards_test.py"],
+    deps = [
+        ":check_header_guards",
+        "@absl_py//absl/testing:absltest",
+    ],
+)
+
+pytype_strict_binary(
+    name = "tags",
+    srcs = ["tags.py"],
 )

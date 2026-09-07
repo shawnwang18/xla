@@ -1,4 +1,4 @@
-/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2018 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,12 +16,22 @@ limitations under the License.
 #include "xla/service/while_util.h"
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/status/status_macros.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/test.h"
+#include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/hlo/utils/hlo_matchers.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/verified_hlo_module.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 
 namespace xla {
@@ -29,9 +39,9 @@ namespace {
 
 namespace op = ::xla::testing::opcode_matchers;
 
-class WhileUtilTest : public HloTestBase {
+class WhileUtilTest : public HloHardwareIndependentTestBase {
  protected:
-  StatusOr<std::unique_ptr<VerifiedHloModule>> GetParsedModule(
+  absl::StatusOr<std::unique_ptr<VerifiedHloModule>> GetParsedModule(
       HloComputation** entry_computation, HloInstruction** param0,
       HloInstruction** param1, HloInstruction** param2) {
     const char* const hlo_string = R"(
@@ -55,7 +65,7 @@ ENTRY entry {
 }
 )";
 
-    TF_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_string));
+    ABSL_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_string));
 
     *entry_computation = module->entry_computation();
     *param0 = (*entry_computation)->parameter_instruction(0);
@@ -131,6 +141,53 @@ TEST_F(WhileUtilTest, MakeTwoInstructionsLive) {
                         op::GetTupleElement(first_half_param_reconstructed, 1),
                         op::GetTupleElement(op::Parameter(0), 2),
                         op::GetTupleElement(op::Parameter(0), 3)));
+}
+
+TEST_F(WhileUtilTest, MakeInstructionLiveInWithOriginalValue) {
+  const char* const hlo_string = R"(
+HloModule ModuleWithWhile
+
+while_body {
+  ROOT p_body = (s32[], s32[]) parameter(0)
+}
+
+while_condition {
+  p_cond = (s32[], s32[]) parameter(0)
+  ROOT result = pred[] constant(true)
+}
+
+ENTRY entry {
+  p_entry_0 = s32[] parameter(0), origin={{"p0"}}
+  p_entry_1 = s32[] parameter(1), origin={{"p1"}}
+  live_in_1 = f32[] parameter(2), origin={{"live_in_1"}}
+  live_in_2 = f32[] parameter(3)
+  live_tuple = (s32[], s32[]) tuple(p_entry_0, p_entry_1), origin={({"tuple_1"}, {"tuple_2"})}
+  while_init = (s32[], s32[]) tuple(p_entry_0, p_entry_1)
+  ROOT while0 = (s32[], s32[]) while(while_init), condition=while_condition, body=while_body, origin={({"p0_while"},{"p1_while"})}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* entry_computation = module->entry_computation();
+  HloInstruction* while_instr = entry_computation->root_instruction();
+  ASSERT_EQ(while_instr->opcode(), HloOpcode::kWhile);
+  HloInstruction* live_in_1 = entry_computation->parameter_instruction(2);
+  HloInstruction* live_in_2 = entry_computation->parameter_instruction(3);
+  HloInstruction* live_tuple =
+      entry_computation->GetInstructionWithName("live_tuple");
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      WhileUtil::MakeInstructionsLiveInResult make_live_in_result,
+      WhileUtil::MakeInstructionsLiveIn(
+          while_instr,
+          /*instructions=*/{live_in_1, live_in_2, live_tuple}));
+
+  HloInstruction* new_while_instr = make_live_in_result.new_while_instr;
+  ASSERT_NE(new_while_instr->original_value(), nullptr);
+  EXPECT_EQ(new_while_instr->original_value()->ToString(),
+            "({\"p0_while\"}, {\"p1_while\"}, {\"live_in_1\"}, {}, "
+            "({\"tuple_1\"}, {\"tuple_2\"}))");
 }
 
 TEST_F(WhileUtilTest, GetInvariantGTEsForWhileBody) {
@@ -214,5 +271,244 @@ ENTRY main {
   };
   EXPECT_EQ(absl::c_count_if(main->instructions(), is_while), 1);
 }
+
+TEST_F(WhileUtilTest, TryIncrementNonCounterTripCount) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+body {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  one.0 = s32[] constant(2)
+  add.0 = s32[] add(gte.0, one.0)
+  ROOT tuple.0 = (s32[], s32[]) tuple(add.0, gte.1)
+}
+
+cond {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  minus-one.0 = s32[] constant(-1)
+  add.0 = add(gte.1, minus-one.0)
+  ROOT compare.0 = compare(gte.0, add.0), direction=LT
+}
+
+ENTRY main {
+  param.0 = (s32[], s32[]) parameter(0)
+  ROOT while = while(param.0), condition=cond, body=body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  const HloComputation* main = module->GetComputationWithName("main");
+  const HloInstruction* while_instr = main->root_instruction();
+  // Loop body increments induction variable by 2, in this case we should fail.
+  EXPECT_FALSE(
+      WhileUtil::IncrementWhileLoopTripCount(*while_instr, /*increment=*/1)
+          .ok());
+}
+
+TEST_F(WhileUtilTest, TryIncrementNonConstantTripCount) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+body {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  one.0 = s32[] constant(1)
+  add.0 = s32[] add(gte.0, one.0)
+  add.1 = s32[] add(gte.1, one.0)
+  ROOT tuple.0 = (s32[], s32[]) tuple(add.0, add.1)
+}
+
+cond {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  minus-one.0 = s32[] constant(-1)
+  add.0 = add(gte.1, minus-one.0)
+  ROOT compare.0 = compare(gte.0, add.0), direction=LT
+}
+
+ENTRY main {
+  param.0 = (s32[], s32[]) parameter(0)
+  ROOT while = while(param.0), condition=cond, body=body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  const HloComputation* main = module->GetComputationWithName("main");
+  const HloInstruction* while_instr = main->root_instruction();
+  // Loop body increments trip count, in this case we should fail.
+  EXPECT_FALSE(
+      WhileUtil::IncrementWhileLoopTripCount(*while_instr, /*increment=*/1)
+          .ok());
+}
+
+TEST_F(WhileUtilTest, TryIncrementSideEffecting) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+body {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  one.0 = s32[] constant(1)
+  add.0 = s32[] add(gte.0, one.0)
+  ROOT tuple.0 = (s32[], s32[]) tuple(add.0, gte.1)
+}
+
+cond {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  minus-one.0 = s32[] constant(-1)
+  add.0 = s32[] custom-call(gte.1, minus-one.0), custom_call_target="add", custom_call_has_side_effect=true
+  ROOT compare.0 = compare(gte.0, add.0), direction=LT
+}
+
+ENTRY main {
+  param.0 = (s32[], s32[]) parameter(0)
+  ROOT while = while(param.0), condition=cond, body=body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  const HloComputation* main = module->GetComputationWithName("main");
+  const HloInstruction* while_instr = main->root_instruction();
+  // The trip count is modified with a side effecting op, in this case we
+  // should fail.
+  EXPECT_FALSE(
+      WhileUtil::IncrementWhileLoopTripCount(*while_instr, /*increment=*/1)
+          .ok());
+}
+
+TEST_F(WhileUtilTest, IncrementTripCountLt) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+body {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  one.0 = s32[] constant(1)
+  add.0 = s32[] add(gte.0, one.0)
+  ROOT tuple.0 = (s32[], s32[]) tuple(add.0, gte.1)
+}
+
+cond {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  minus-one.0 = s32[] constant(-1)
+  add.0 = add(gte.1, minus-one.0)
+  ROOT compare.0 = compare(gte.0, add.0), direction=LT
+}
+
+ENTRY main {
+  param.0 = (s32[], s32[]) parameter(0)
+  ROOT while = while(param.0), condition=cond, body=body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  const HloComputation* main = module->GetComputationWithName("main");
+  const HloInstruction* while_instr = main->root_instruction();
+  TF_EXPECT_OK(
+      WhileUtil::IncrementWhileLoopTripCount(*while_instr, /*increment=*/1));
+
+  const HloComputation* cond = module->GetComputationWithName("cond");
+  EXPECT_THAT(cond->root_instruction()->operand(0),
+              op::Add(op::GetTupleElement(), op::Constant()));
+}
+
+TEST_F(WhileUtilTest, IncrementTripCountGt) {
+  constexpr absl::string_view hlo = R"(
+HloModule main
+
+body {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  one.0 = s32[] constant(1)
+  add.0 = s32[] add(gte.1, one.0)
+  ROOT tuple.0 = (s32[], s32[]) tuple(gte.0, add.0)
+}
+
+cond {
+  param.0 = (s32[], s32[]) parameter(0)
+  gte.0 = get-tuple-element(param.0), index=0
+  gte.1 = get-tuple-element(param.0), index=1
+  minus-one.0 = s32[] constant(-1)
+  add.0 = add(gte.0, minus-one.0)
+  ROOT compare.0 = compare(add.0, gte.1), direction=GT
+}
+
+ENTRY main {
+  param.0 = (s32[], s32[]) parameter(0)
+  ROOT while = while(param.0), condition=cond, body=body
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
+  const HloComputation* main = module->GetComputationWithName("main");
+  const HloInstruction* while_instr = main->root_instruction();
+  TF_EXPECT_OK(
+      WhileUtil::IncrementWhileLoopTripCount(*while_instr, /*increment=*/1));
+
+  const HloComputation* cond = module->GetComputationWithName("cond");
+  EXPECT_THAT(cond->root_instruction()->operand(1),
+              op::Add(op::GetTupleElement(), op::Constant()));
+}
+
+TEST_F(WhileUtilTest, IsUpdatedBufferWriteOnly) {
+  const char* const hlo_string = R"(
+HloModule ModuleWithWriteOnly
+
+ENTRY entry {
+  p_entry_0 = f32[32,32]{1,0} parameter(0)
+  p_entry_1 = f32[32,32]{1,0} parameter(1)
+
+  zero = s32[] constant(0)
+  update_slice = f32[1,32]{1,0} constant({ {0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0} })
+
+  // Base DUS
+  dus1 = f32[32,32]{1,0} dynamic-update-slice(p_entry_0, update_slice, zero, zero)
+
+  // Chained DUS (Safe)
+  dus2 = f32[32,32]{1,0} dynamic-update-slice(dus1, update_slice, zero, zero)
+
+  // Unsafe read
+  slice1 = f32[1,32]{1,0} dynamic-slice(dus1, zero, zero), dynamic_slice_sizes={1,32}
+
+  // Unsafe usage as payload
+  dus3 = f32[32,32]{1,0} dynamic-update-slice(p_entry_1, dus1, zero, zero)
+
+  // Dead code DUS (Unsafe because update is discarded)
+  dus4 = f32[32,32]{1,0} dynamic-update-slice(p_entry_1, update_slice, zero, zero)
+
+  ROOT root = tuple(dus2, slice1, dus3)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloInstruction* dus1 = FindInstruction(module.get(), "dus1");
+  HloInstruction* dus2 = FindInstruction(module.get(), "dus2");
+  HloInstruction* dus4 = FindInstruction(module.get(), "dus4");
+
+  ASSERT_NE(dus1, nullptr);
+  ASSERT_NE(dus2, nullptr);
+  ASSERT_NE(dus4, nullptr);
+
+  // dus1 is NOT write-only because it feeds slice1 (a read) and dus3 (as
+  // payload)
+  EXPECT_FALSE(WhileUtil::IsUpdatedBufferWriteOnly(dus1));
+
+  // dus2 IS write-only because it ONLY feeds the root instruction
+  EXPECT_TRUE(WhileUtil::IsUpdatedBufferWriteOnly(dus2));
+
+  // dus4 is NOT write-only because it has 0 users (dead code)
+  EXPECT_FALSE(WhileUtil::IsUpdatedBufferWriteOnly(dus4));
+}
+
 }  // namespace
 }  // namespace xla

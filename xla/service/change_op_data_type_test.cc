@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,26 +15,27 @@ limitations under the License.
 
 #include "xla/service/change_op_data_type.h"
 
-#include <string>
-#include <tuple>
-#include <vector>
+#include <memory>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/types/span.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
 #include "xla/service/pattern_matcher.h"
-#include "xla/service/pattern_matcher_gmock.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/shape.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
 
 namespace xla {
 namespace {
 
 namespace m = ::xla::match;
 
-class ChangeOpDataTypeTest : public HloTestBase {
- public:
-  ChangeOpDataTypeTest()
-      : HloTestBase(/*verifier_layout_sensitive=*/false,
-                    /*allow_mixed_precision_in_hlo_verifier=*/false) {}
-};
+using ChangeOpDataTypeTest = HloHardwareIndependentTestBase;
 
 TEST_F(ChangeOpDataTypeTest, Simple) {
   const char* const kModuleStr = R"(
@@ -101,6 +102,35 @@ TEST_F(ChangeOpDataTypeTest, DotAndConv) {
                          m::Convert(m::Parameter(2)).WithShape(F32, {1, 2, 1}),
                          m::Convert(m::Parameter(3)).WithShape(F32, {1, 1, 1})))
               .WithShape(F16, {1, 2, 1}))));
+}
+
+TEST_F(ChangeOpDataTypeTest, WideningDotAndConv) {
+  const char* const kModuleStr = R"(
+  HloModule module
+  ENTRY entry {
+    dot = f32[10,10] dot(f16[10,10] parameter(0), f16[10,10] parameter(1)),
+      lhs_contracting_dims={1}, rhs_contracting_dims={0}
+    conv = f32[1,2,1] convolution(f16[1,2,1] parameter(2), f16[1,1,1] parameter(3)),
+      window={size=1}, dim_labels=b0f_0io->b0f
+    root = tuple(dot, conv)
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kModuleStr));
+
+  ChangeOpDataType pass(
+      F16, F32, HloPredicateIsOp<HloOpcode::kDot, HloOpcode::kConvolution>);
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
+  SCOPED_TRACE(module->ToString());
+  EXPECT_TRUE(changed);
+  EXPECT_THAT(
+      module->entry_computation()->root_instruction(),
+      GmockMatch(m::Tuple(
+          m::Dot(m::Convert(m::Parameter(0)).WithShape(F32, {10, 10}),
+                 m::Convert(m::Parameter(1)).WithShape(F32, {10, 10}))
+              .WithShape(F32, {10, 10}),
+          m::Convolution(m::Convert(m::Parameter(2)).WithShape(F32, {1, 2, 1}),
+                         m::Convert(m::Parameter(3)).WithShape(F32, {1, 1, 1}))
+              .WithShape(F32, {1, 2, 1}))));
 }
 
 TEST_F(ChangeOpDataTypeTest, SimpleWithCloner) {

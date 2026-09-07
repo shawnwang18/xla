@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,10 +16,22 @@ limitations under the License.
 #ifndef XLA_SERVICE_COLLECTIVE_PIPELINER_H_
 #define XLA_SERVICE_COLLECTIVE_PIPELINER_H_
 
+#include <cstdint>
+#include <functional>
+#include <optional>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/service/hlo_pass_interface.h"
-#include "xla/statusor.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/pass/hlo_pass_interface.h"
+#include "xla/service/collective_pipeliner_utils.h"
+#include "xla/side_effect_util.h"
+#include "xla/util.h"
 
 namespace xla {
 
@@ -56,11 +68,17 @@ namespace xla {
 // }
 class CollectivePipeliner : public HloModulePass {
  public:
-  enum PipeliningDirection {
-    kBackward,
-    kForward,
-    kForwardSink,
-  };
+  // Postprocessing cloned collective instructions, such as peeled instructions
+  // before and after the loop, and rotated instructions. The new while op is
+  // only passed for the peeled trailing ops when the new while op was already
+  // created.
+  using HloPostprocessor = std::function<absl::Status(
+      HloInstruction* instr, HloInstruction* new_while_instr)>;
+  using WhileLoopPostprocessor =
+      std::function<absl::Status(HloInstruction* while_loop)>;
+  using AdditionalChainStartOpFinder =
+      std::function<std::optional<HloInstruction*>(HloInstruction*)>;
+
   struct Config {
     int64_t level_to_operate_on = 0;
     // Maximum number of HLOs to pipeline per loop. (Meant to help controlling
@@ -73,46 +91,115 @@ class CollectivePipeliner : public HloModulePass {
     // iteration.
     bool pipeline_use_tree = false;
     bool process_different_sized_ops = false;
-    PipeliningDirection pipelining_direction = PipeliningDirection::kForward;
+    collective_pipeliner_utils::PipeliningDirection pipelining_direction =
+        collective_pipeliner_utils::PipeliningDirection::kForward;
     HloPredicate should_process;
+    // Filter acceptable formatting ops for for forward pipelining to discard
+    // cases that pipeline formatting operations that we don't want to support.
+    HloPredicate acceptable_formatting;
+    // If the pipelined op has same input/output size the we reuse  the same
+    // buffer we are storing the value in in the output loop for forward
+    // pipelining. This function allows to not do it for certain ops.
+    HloPredicate reuse_pipelined_op_buffer;
+    // Determine whether a loop variant parameter should be allowed in
+    // pipelining chains. This is currently only used to support kBackward
+    // pipelinining.
+    HloPredicate should_allow_loop_variant_parameter_in_chain =
+        HloPredicateFalse;
+    // Whether we allow control dependencies on the Collective operation being
+    // pipelined. The control dependencies will be dropped when the operation is
+    // pipelined. This is currently only used to support kBackward pipelining.
+    bool should_allow_control_dependencies = false;
+    // Function to find an additional operation to start the operand chain from.
+    // If set, this function will be called to discover additional starting
+    // points for the operand chain (e.g., DynamicSlice operations through
+    // formatting ops).
+    AdditionalChainStartOpFinder additional_chain_start_op_finder = nullptr;
+    // TODO(b/399476667): Consolidate these postprocessing functions.
+    HloPostprocessor postprocess_backward_peeled_op;
+    HloPostprocessor postprocess_backward_rotated_op;
+    HloPostprocessor postprocess_backward_peeled_trailing_op;
+    // Determines whether a loop invariant instruction can be considered
+    // in the pipelining chain.
+    bool should_add_loop_invariant_op_in_chain = false;
+    // Postprocessing hook which runs for every successfully pipelined op.
+    HloPostprocessor postprocess_pipelined_ops;
+    int64_t collective_size_threshold_to_delay_sinking = INT64_MAX;
+    bool delay_sinking_large_collectives = true;
+    // When cloning collectives, use a unique channel id for each clone.
+    bool unique_channel_id = true;
+    // Postprocessing hook which runs for every successfully transformed while
+    // loop.
+    WhileLoopPostprocessor postprocess_transformed_while_loop;
   };
   static const char* const kInsertedByPreviousStep;
   static const char* const kSunkByPreviousStep;
+  static constexpr absl::string_view kAlwaysSinkAttr = "always_sink";
   explicit CollectivePipeliner(const Config& config) : config_(config) {}
   CollectivePipeliner(CollectivePipeliner&& other) = default;
   CollectivePipeliner& operator=(CollectivePipeliner&& other) = default;
-  absl::string_view GetPipelineDirectionString(PipeliningDirection direction) {
+  absl::string_view GetPipelineDirectionString(
+      collective_pipeliner_utils::PipeliningDirection direction) {
     switch (direction) {
-      case PipeliningDirection::kForward: {
+      case collective_pipeliner_utils::PipeliningDirection::kForward: {
         return "forward";
       }
-      case PipeliningDirection::kBackward: {
+      case collective_pipeliner_utils::PipeliningDirection::kBackward: {
         return "backward";
       }
-      case PipeliningDirection::kForwardSink: {
+      case collective_pipeliner_utils::PipeliningDirection::kForwardSink: {
         return "forwardsink";
       }
     }
   }
 
+  static constexpr absl::string_view kName = "collective-pipeliner";
   absl::string_view name() const override {
-    if (config_.pipelining_direction == kForward) {
+    if (config_.pipelining_direction ==
+        collective_pipeliner_utils::PipeliningDirection::kForward) {
       return "collective-pipeliner-forward";
-    } else if (config_.pipelining_direction == kBackward) {
+    } else if (config_.pipelining_direction ==
+               collective_pipeliner_utils::PipeliningDirection::kBackward) {
       return "collective-pipeliner-backward";
     } else {
       return "collective-pipeliner-forwardsink";
     }
   }
 
-  using HloPassInterface::Run;
-  StatusOr<bool> Run(
+  // Pipelines the collectives that do not have any other pipelineable
+  // collectives in their user subtree.
+  absl::StatusOr<bool> RunPipeliner(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads);
+
+ protected:
+  absl::StatusOr<bool> RunImpl(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
-  const Config config_;
+  Config config_;
 };
+
+// Returns a predicate matching instructions with the given opcode(s) and a
+// boolean-true is_pipelineable frontend attribute.
+template <HloOpcode op, HloOpcode... rest>
+HloPredicate HloPredicateIsPipelineableOp() {
+  const auto has_pipelineable_attr = [](const HloInstruction* hlo) {
+    if (!hlo->has_frontend_attributes()) {
+      return false;
+    }
+
+    auto value = hlo->get_frontend_attribute(kIsPipelineableAttr);
+    bool is_pipelineable = false;
+    return value && absl::SimpleAtob(*value, &is_pipelineable) &&
+           is_pipelineable;
+  };
+
+  return [has_pipelineable_attr](const HloInstruction* hlo) {
+    return HloPredicateIsOp<op, rest...>(hlo) && has_pipelineable_attr(hlo);
+  };
+}
 
 }  // namespace xla
 

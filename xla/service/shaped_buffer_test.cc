@@ -1,4 +1,4 @@
-/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2018 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,14 +15,26 @@ limitations under the License.
 
 #include "xla/service/shaped_buffer.h"
 
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
+#include <set>
 #include <utility>
+#include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/service/platform_util.h"
+#include "xla/shape.h"
+#include "xla/shape_tree.h"
 #include "xla/shape_util.h"
-#include "xla/stream_executor/device_memory_allocator.h"
-#include "xla/stream_executor/stream_executor.h"
-#include "xla/test.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/device_address_allocator.h"
+#include "xla/stream_executor/stream_executor_memory_allocator.h"
+#include "xla/xla_data.pb.h"
+#include "tsl/platform/statusor.h"
 #include "tsl/platform/test_benchmark.h"
 
 namespace xla {
@@ -33,7 +45,8 @@ TEST(ShapedBufferTest, ScopedShapeBufferAsShapedBufferB71629047) {
                           xla::PlatformUtil::GetDefaultPlatform());
   TF_ASSERT_OK_AND_ASSIGN(auto executors,
                           xla::PlatformUtil::GetStreamExecutors(platform));
-  xla::se::StreamExecutorMemoryAllocator allocator(platform, executors);
+  stream_executor::StreamExecutorAddressAllocator allocator(platform,
+                                                            executors);
   const xla::Shape shape = xla::ShapeUtil::MakeShape(xla::F32, {});
   const int kDeviceOrdinal = 0;
   auto scoped_buffer = std::make_unique<xla::ScopedShapedBuffer>(
@@ -42,10 +55,11 @@ TEST(ShapedBufferTest, ScopedShapeBufferAsShapedBufferB71629047) {
   buffer = nullptr;
 }
 
-class TestAllocator : public se::DeviceMemoryAllocator {
+class TestAllocator : public se::DeviceAddressAllocator {
  public:
   TestAllocator()
-      : se::DeviceMemoryAllocator(PlatformUtil::GetDefaultPlatform().value()) {}
+      : se::DeviceAddressAllocator(PlatformUtil::GetDefaultPlatform().value()) {
+  }
 
   ~TestAllocator() override {
     if (!allocations_.empty()) {
@@ -54,24 +68,25 @@ class TestAllocator : public se::DeviceMemoryAllocator {
   }
 
   // Pull in two-arg overload of Allocate.
-  using se::DeviceMemoryAllocator::Allocate;
+  using se::DeviceAddressAllocator::Allocate;
 
-  StatusOr<se::OwningDeviceMemory> Allocate(int device_ordinal, uint64_t size,
-                                            bool /*retry_on_failure*/,
-                                            int64_t /*memory_space*/) override {
+  absl::StatusOr<se::ScopedDeviceAddress<uint8_t>> Allocate(
+      int device_ordinal, uint64_t size, bool /*retry_on_failure*/,
+      int64_t /*memory_space*/) override {
     // By contract, we must return null if size == 0.
     if (size == 0) {
-      return se::OwningDeviceMemory();
+      return se::ScopedDeviceAddress<uint8_t>();
     }
     void* buf = malloc(size);
     allocations_.insert({device_ordinal, buf});
-    return se::OwningDeviceMemory(se::DeviceMemoryBase(buf, size),
-                                  device_ordinal, this);
+    return se::ScopedDeviceAddress<uint8_t>(se::DeviceAddressBase(buf, size),
+                                            device_ordinal, this);
   }
 
-  Status Deallocate(int device_ordinal, se::DeviceMemoryBase mem) override {
+  absl::Status Deallocate(int device_ordinal,
+                          se::DeviceAddressBase mem) override {
     if (mem.is_null()) {
-      return OkStatus();
+      return absl::OkStatus();
     }
 
     auto it = allocations_.find({device_ordinal, mem.opaque()});
@@ -81,12 +96,12 @@ class TestAllocator : public se::DeviceMemoryAllocator {
       free(mem.opaque());
       allocations_.erase(it);
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   bool AllowsAsynchronousDeallocation() const override { return false; }
 
-  StatusOr<se::Stream*> GetStream(int device_ordinal) override {
+  absl::StatusOr<se::Stream*> GetStream(int device_ordinal) override {
     LOG(FATAL) << "Not implemented";
   }
 
@@ -119,20 +134,20 @@ TEST(ScopedShapedBufferTest, TestTakeSubTree) {
 
   ScopedShapedBuffer sb(s, &allocator, /*device_ordinal=*/0);
   sb.buffers().ForEachMutableElement(
-      [&](const xla::ShapeIndex& index, se::DeviceMemoryBase* buffer) {
+      [&](const xla::ShapeIndex& index, se::DeviceAddressBase* buffer) {
         TF_ASSERT_OK_AND_ASSIGN(
-            se::OwningDeviceMemory m,
+            se::ScopedDeviceAddress<uint8_t> m,
             allocator.Allocate(/*device_ordinal=*/0, /*size=*/77));
         *buffer = m.Release();
       });
-  ShapeTree<se::DeviceMemoryBase> buffers = sb.buffers();
+  ShapeTree<se::DeviceAddressBase> buffers = sb.buffers();
 
   // Takes a subtree out of 'sb', and verifies the buffers are as expected.
   xla::ShapeIndex subtree_index = {1};
   ScopedShapedBuffer output = sb.TakeSubTree(subtree_index);
 
   output.buffers().ForEachElement([&](const xla::ShapeIndex& sub_index,
-                                      const se::DeviceMemoryBase& buffer) {
+                                      const se::DeviceAddressBase& buffer) {
     xla::ShapeIndex orig_index = subtree_index;
     for (int i : sub_index) {
       orig_index.push_back(i);
@@ -140,7 +155,7 @@ TEST(ScopedShapedBufferTest, TestTakeSubTree) {
     EXPECT_TRUE(buffers.find(orig_index)->second.IsSameAs(buffer));
   });
   sb.buffers().ForEachElement([&](const xla::ShapeIndex& index,
-                                  const se::DeviceMemoryBase& buffer) {
+                                  const se::DeviceAddressBase& buffer) {
     if ((index.size() >= subtree_index.size()) &&
         ShapeIndexView(index).first(subtree_index.size()) == subtree_index) {
       EXPECT_TRUE(buffer.is_null());
@@ -157,9 +172,9 @@ TEST(ScopedShapedBufferTest, TestSubShapeTree) {
   TestAllocator allocator;
   ScopedShapedBuffer sb(tuple_shape, &allocator, /*device_ordinal=*/0);
   sb.buffers().ForEachMutableElement(
-      [&](const xla::ShapeIndex& index, se::DeviceMemoryBase* buffer) {
+      [&](const xla::ShapeIndex& index, se::DeviceAddressBase* buffer) {
         TF_ASSERT_OK_AND_ASSIGN(
-            se::OwningDeviceMemory m,
+            se::ScopedDeviceAddress<uint8_t> m,
             allocator.Allocate(/*device_ordinal=*/0, /*size=*/32));
         *buffer = m.Release();
       });

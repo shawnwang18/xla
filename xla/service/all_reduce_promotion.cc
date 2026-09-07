@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,12 +19,29 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/xla_data.pb.h"
+
 namespace xla {
 
 namespace {
 bool IsAllReduce(const HloInstruction* inst) {
   return inst->opcode() == HloOpcode::kAllReduce ||
          inst->opcode() == HloOpcode::kReduceScatter;
+}
+
+bool IsAllReduceOnly(const HloInstruction* inst) {
+  return inst->opcode() == HloOpcode::kAllReduce;
 }
 
 std::unique_ptr<HloInstruction> CloneAllReduce(
@@ -57,10 +74,13 @@ std::unique_ptr<HloInstruction> CloneAllReduce(
 // Promote 16-bit integer all-reduce and reduce-scatter to 32-bit integer types.
 // {{U16, U32}, {S16, S32}}
 AllReducePromotion::AllReducePromotion(
-    absl::Span<std::pair<PrimitiveType, PrimitiveType> const> from_to_types)
-    : pass_(from_to_types, IsAllReduce, CloneAllReduce) {}
+    absl::Span<std::pair<PrimitiveType, PrimitiveType> const> from_to_types,
+    bool promote_all_reduce_only)
+    : pass_(from_to_types,
+            promote_all_reduce_only ? IsAllReduceOnly : IsAllReduce,
+            CloneAllReduce) {}
 
-StatusOr<bool> AllReducePromotion::Run(
+absl::StatusOr<bool> AllReducePromotion::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   return pass_.Run(module, execution_threads);

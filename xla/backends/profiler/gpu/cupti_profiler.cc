@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,9 +15,14 @@ limitations under the License.
 
 #include "xla/backends/profiler/gpu/cupti_profiler.h"
 
-#include "absl/cleanup/cleanup.h"
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
+#include <cstdint>
+#include <string>
+
+#include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "xla/backends/profiler/gpu/cupti_interface.h"
+#include "xla/backends/profiler/gpu/cupti_utils.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/host_info.h"
@@ -64,7 +69,7 @@ void CuptiProfiler::Enable(const CuptiProfilerOptions &option) {}
 
 void CuptiProfiler::Disable() {}
 
-/*static*/ tsl::uint64 CuptiProfiler::GetTimestamp() {
+/*static*/ uint64_t CuptiProfiler::GetTimestamp() {
   uint64_t tsc;
   CuptiInterface *cupti_interface = GetCuptiInterface();
   if (cupti_interface && cupti_interface->GetTimestamp(&tsc) == CUPTI_SUCCESS) {

@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +17,25 @@ limitations under the License.
 
 #include <cstddef>
 #include <memory>
+#include <optional>
+#include <utility>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/algorithm/container.h"
+#include "absl/status/status_macros.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
 #include "xla/hlo/utils/hlo_matchers.h"
-#include "xla/service/pattern_matcher_gmock.h"
-#include "xla/statusor.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/service/pattern_matcher.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
@@ -34,19 +43,19 @@ namespace {
 namespace m = xla::testing::opcode_matchers;
 using ::testing::_;
 
-class AllReduceSimplifierTest : public HloTestBase {
+class AllReduceSimplifierTest : public HloHardwareIndependentTestBase {
  public:
-  StatusOr<std::unique_ptr<HloModule>> RunPass(
+  absl::StatusOr<std::unique_ptr<HloModule>> RunPass(
       absl::string_view hlo_module, bool expect_change,
       bool reassociate_converted_ar = false) {
-    TF_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_module));
+    ABSL_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_module));
     auto changed =
         AllReduceReassociate(reassociate_converted_ar).Run(module.get());
     if (!changed.ok()) {
       return changed.status();
     }
     EXPECT_EQ(changed.value(), expect_change);
-    return StatusOr<std::unique_ptr<HloModule>>(std::move(module));
+    return absl::StatusOr<std::unique_ptr<HloModule>>(std::move(module));
   }
 
   size_t AllReduceCount(std::unique_ptr<HloModule>& module) {
@@ -77,6 +86,8 @@ ENTRY main {
                           RunPass(hlo_string, /*expect_change=*/true));
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               m::AllReduce(m::Add(m::Parameter(0), m::Parameter(1))));
+  EXPECT_EQ(module->entry_computation()->root_instruction()->channel_id(),
+            std::nullopt);
   EXPECT_EQ(AllReduceCount(module), 1);
 }
 
@@ -102,6 +113,7 @@ ENTRY main {
                           RunPass(hlo_string, /*expect_change=*/true));
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               m::AllReduce(m::Add(m::Parameter(0), m::Parameter(1))));
+  EXPECT_EQ(module->entry_computation()->root_instruction()->channel_id(), 1);
   EXPECT_EQ(AllReduceCount(module), 1);
 }
 
@@ -629,5 +641,193 @@ ENTRY main {
                           RunPass(hlo_string, /*expect_change=*/false));
   SCOPED_TRACE(module->ToString());
 }
+
+TEST_F(AllReduceSimplifierTest, AllReduceDynamicSlicePattern) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+ENTRY main {
+  p0 = f32[1,8] parameter(0)
+  p1 = f32[1,8] parameter(1)
+  p2 = f32[1,8] parameter(2)
+  p3 = s32[] parameter(3)
+  cst = s32[] constant(0)
+  ar0 = f32[1,8] all-reduce(p0), replica_groups={}, to_apply=sum
+  ar1 = f32[1,8] all-reduce(p1), replica_groups={}, to_apply=sum
+  ar2 = f32[1,8] all-reduce(p2), replica_groups={}, to_apply=sum
+  dyn0 = f32[1,4] dynamic-slice(ar0, cst, p3), dynamic_slice_sizes={1,4}
+  dyn1 = f32[1,4] dynamic-slice(ar1, cst, p3), dynamic_slice_sizes={1,4}
+  dyn2 = f32[1,4] dynamic-slice(ar2, cst, p3), dynamic_slice_sizes={1,4}
+  add = f32[1,4] add(dyn0, dyn1)
+  ROOT add1 = f32[1,4] add(add, dyn2)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          RunPass(hlo_string, /*expect_change=*/true));
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              m::DynamicSlice(
+                  m::AllReduce(m::Add(m::Add(m::Parameter(0), m::Parameter(1)),
+                                      m::Parameter(2))),
+                  m::Constant(), m::Parameter(3)));
+  XLA_VLOG_LINES(1, module->ToString());
+  EXPECT_EQ(AllReduceCount(module), 1);
+}
+
+TEST_F(AllReduceSimplifierTest, AllReduceDynamicSlicePatternSameOperand) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+ENTRY main {
+  p0 = f32[1,8] parameter(0)
+  p1 = f32[1,8] parameter(1)
+  p2 = s32[] parameter(2)
+  cst = s32[] constant(0)
+  ar0 = f32[1,8] all-reduce(p0), replica_groups={}, to_apply=sum
+  ar2 = f32[1,8] all-reduce(p1), replica_groups={}, to_apply=sum
+  dyn0 = f32[1,4] dynamic-slice(ar0, cst, p2), dynamic_slice_sizes={1,4}
+  dyn2 = f32[1,4] dynamic-slice(ar2, cst, p2), dynamic_slice_sizes={1,4}
+  add = f32[1,4] add(dyn0, dyn0)
+  ROOT add1 = f32[1,4] add(add, dyn2)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          RunPass(hlo_string, /*expect_change=*/true));
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              m::DynamicSlice(
+                  m::AllReduce(m::Add(m::Add(m::Parameter(0), m::Parameter(0)),
+                                      m::Parameter(1))),
+                  m::Constant(), m::Parameter(2)));
+  XLA_VLOG_LINES(1, module->ToString());
+  EXPECT_EQ(AllReduceCount(module), 1);
+}
+
+TEST_F(AllReduceSimplifierTest, AllReduceDynamicSliceDifferentSlices) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+ENTRY main {
+  p0 = f32[1,8] parameter(0)
+  p1 = f32[1,8] parameter(1)
+  p2 = f32[1,16] parameter(2)
+  p3 = s32[] parameter(3)
+  cst = s32[] constant(0)
+  ar0 = f32[1,8] all-reduce(p0), replica_groups={}, to_apply=sum
+  ar1 = f32[1,8] all-reduce(p1), replica_groups={}, to_apply=sum
+  ar2 = f32[1,16] all-reduce(p2), replica_groups={}, to_apply=sum
+  dyn0 = f32[1,4] dynamic-slice(ar0, cst, p3), dynamic_slice_sizes={1,4}
+  dyn1 = f32[1,4] dynamic-slice(ar1, cst, p3), dynamic_slice_sizes={1,4}
+  dyn2 = f32[1,4] dynamic-slice(ar2, cst, p3), dynamic_slice_sizes={1,4}
+  add = f32[1,4] add(dyn0, dyn1)
+  ROOT add1 = f32[1,4] add(add, dyn2)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          RunPass(hlo_string, /*expect_change=*/true));
+  EXPECT_THAT(
+      module->entry_computation()->root_instruction(),
+      m::Add(m::DynamicSlice(),
+             m::DynamicSlice(m::AllReduce(), m::Constant(), m::Parameter(3))));
+  XLA_VLOG_LINES(1, module->ToString());
+  EXPECT_EQ(AllReduceCount(module), 2);
+}
+
+TEST_F(AllReduceSimplifierTest, ReassociatesMatchingCollectiveGroupKeys) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  ar0 = f32[8] all-reduce(p0), replica_groups={}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  ar1 = f32[8] all-reduce(p1), replica_groups={}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  ROOT add = f32[8] add(ar0, ar1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/true));
+  EXPECT_EQ(AllReduceCount(module), 1);
+  HloInstruction* all_reduce = module->entry_computation()->root_instruction();
+  EXPECT_EQ(all_reduce->get_frontend_attribute("collective_group_key"), "g0");
+}
+
+TEST_F(AllReduceSimplifierTest,
+       DoesNotReassociateDifferentCollectiveGroupKeys) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  ar0 = f32[8] all-reduce(p0), replica_groups={}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  ar1 = f32[8] all-reduce(p1), replica_groups={}, to_apply=sum,
+    frontend_attributes={collective_group_key="g1"}
+  ROOT add = f32[8] add(ar0, ar1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/false));
+  EXPECT_EQ(AllReduceCount(module), 2);
+}
+
+TEST_F(AllReduceSimplifierTest, DoesNotReassociateKeyedAndUnkeyedCollectives) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  ar0 = f32[8] all-reduce(p0), replica_groups={}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  ar1 = f32[8] all-reduce(p1), replica_groups={}, to_apply=sum
+  ROOT add = f32[8] add(ar0, ar1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/false));
+  EXPECT_EQ(AllReduceCount(module), 2);
+}
+
 }  // namespace
 }  // namespace xla

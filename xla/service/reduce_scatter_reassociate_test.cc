@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,27 +15,33 @@ limitations under the License.
 
 #include "xla/service/reduce_scatter_reassociate.h"
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include "absl/status/status_macros.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/hlo/utils/hlo_matchers.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/service/hlo_verifier.h"
+#include "xla/service/scheduling_annotations_util.h"
 
 namespace xla {
 namespace {
 
 namespace m = xla::testing::opcode_matchers;
 
-class ReduceScatterReassociateTest : public HloTestBase {
+class ReduceScatterReassociateTest : public HloHardwareIndependentTestBase {
  public:
-  StatusOr<std::unique_ptr<HloModule>> RunPass(absl::string_view hlo_module,
-                                               bool expect_change) {
-    TF_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_module));
+  absl::StatusOr<std::unique_ptr<HloModule>> RunPass(
+      absl::string_view hlo_module, bool expect_change) {
+    ABSL_ASSIGN_OR_RETURN(auto module, ParseAndReturnVerifiedModule(hlo_module));
     auto changed = ReduceScatterReassociate().Run(module.get());
     if (!changed.ok()) {
       return changed.status();
     }
     EXPECT_EQ(changed.value(), expect_change);
-    return StatusOr<std::unique_ptr<HloModule>>(std::move(module));
+    return absl::StatusOr<std::unique_ptr<HloModule>>(std::move(module));
   }
 
   size_t ReduceScatterCount(std::unique_ptr<HloModule>& module) {
@@ -348,6 +354,137 @@ ENTRY main {
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           RunPass(hlo_string, /*expect_change=*/true));
+}
+
+TEST_F(ReduceScatterReassociateTest, InconsistentAnnotation) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  rs0 = f32[4] reduce-scatter(p0), dimensions={0}, to_apply=sum, frontend_attributes={_scheduling_group_id="0"}
+  rs1 = f32[4] reduce-scatter(p1), dimensions={0}, to_apply=sum, frontend_attributes={_scheduling_group_id="1"}
+  add = f32[4] add(rs0, rs1)
+  ROOT c = f32[4] copy(add)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          RunPass(hlo_string, /*expect_change=*/false));
+}
+
+TEST_F(ReduceScatterReassociateTest, DeleteAnnotation) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  rs0 = f32[4] reduce-scatter(p0), dimensions={0}, to_apply=sum, frontend_attributes={_scheduling_group_id="0"}
+  rs1 = f32[4] reduce-scatter(p1), dimensions={0}, to_apply=sum
+  add = f32[4] add(rs0, rs1)
+  ROOT c = f32[4] copy(add)
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          RunPass(hlo_string, /*expect_change=*/true));
+  auto* rs = FindInstruction(module.get(), HloOpcode::kReduceScatter);
+  EXPECT_FALSE(HasSchedulingAnnotation(rs));
+}
+
+TEST_F(ReduceScatterReassociateTest, ReassociatesMatchingCollectiveGroupKeys) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  rs0 = f32[4] reduce-scatter(p0), dimensions={0}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  rs1 = f32[4] reduce-scatter(p1), dimensions={0}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  ROOT add = f32[4] add(rs0, rs1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/true));
+  EXPECT_EQ(ReduceScatterCount(module), 1);
+  HloInstruction* reduce_scatter =
+      module->entry_computation()->root_instruction();
+  EXPECT_EQ(reduce_scatter->get_frontend_attribute("collective_group_key"),
+            "g0");
+}
+
+TEST_F(ReduceScatterReassociateTest,
+       DoesNotReassociateDifferentCollectiveGroupKeys) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  rs0 = f32[4] reduce-scatter(p0), dimensions={0}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  rs1 = f32[4] reduce-scatter(p1), dimensions={0}, to_apply=sum,
+    frontend_attributes={collective_group_key="g1"}
+  ROOT add = f32[4] add(rs0, rs1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/false));
+  EXPECT_EQ(ReduceScatterCount(module), 2);
+}
+
+TEST_F(ReduceScatterReassociateTest,
+       DoesNotReassociateKeyedAndUnkeyedCollectives) {
+  constexpr absl::string_view kHloModule = R"(
+HloModule m
+
+sum {
+  x = f32[] parameter(0)
+  y = f32[] parameter(1)
+  ROOT add = f32[] add(x, y)
+}
+
+ENTRY main {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  rs0 = f32[4] reduce-scatter(p0), dimensions={0}, to_apply=sum,
+    frontend_attributes={collective_group_key="g0"}
+  rs1 = f32[4] reduce-scatter(p1), dimensions={0}, to_apply=sum
+  ROOT add = f32[4] add(rs0, rs1)
+}
+)";
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       RunPass(kHloModule, /*expect_change=*/false));
+  EXPECT_EQ(ReduceScatterCount(module), 2);
 }
 
 }  // namespace

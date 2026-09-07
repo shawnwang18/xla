@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2026 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,24 +15,57 @@ limitations under the License.
 
 #include "xla/stream_executor/command_buffer.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
-#include "xla/stream_executor/stream_executor_internal.h"
-#include "tsl/platform/statusor.h"
+#include "absl/base/no_destructor.h"
+#include "absl/base/optimization.h"
+#include "absl/functional/function_ref.h"
+#include "absl/synchronization/mutex.h"
 
 namespace stream_executor {
 
-/*static*/ tsl::StatusOr<CommandBuffer> CommandBuffer::Create(
-    StreamExecutor* executor) {
-  // TODO(ezhulenev): Construct command buffer from platform-specific command
-  // buffer implementation. It requires cleaning up build files first.
-  std::unique_ptr<internal::CommandBufferInterface> command_buffer = nullptr;
-  return tsl::StatusOr<CommandBuffer>(std::move(command_buffer));
+CommandBuffer::ResourceTypeId CommandBuffer::GetNextResourceTypeId() {
+  static absl::NoDestructor<std::atomic<int64_t>> counter(1);
+  return ResourceTypeId(counter->fetch_add(1));
 }
 
-CommandBuffer::CommandBuffer(
-    std::unique_ptr<internal::CommandBufferInterface> implementation)
-    : implementation_(std::move(implementation)) {}
+CommandBuffer::Resource* CommandBuffer::GetOrNullResource(
+    ResourceTypeId type_id) {
+  absl::MutexLock lock(resource_mutex_);
+  auto it = resources_.find(type_id);
+  return (it != resources_.end()) ? it->second.get() : nullptr;
+}
+
+CommandBuffer::Resource* CommandBuffer::GetOrCreateResource(
+    ResourceTypeId type_id,
+    absl::FunctionRef<std::unique_ptr<Resource>()> create) {
+  // First, try to find the resource under lock
+  {
+    absl::MutexLock lock(resource_mutex_);
+    auto it = resources_.find(type_id);
+    if (ABSL_PREDICT_TRUE(it != resources_.end())) {
+      return it->second.get();
+    }
+  }
+
+  // Resource not found, create it outside the lock
+  auto resource = create();
+  Resource* ptr = resource.get();
+
+  // Acquire lock again to insert the new resource
+  {
+    absl::MutexLock lock(resource_mutex_);
+    auto [it, inserted] = resources_.try_emplace(type_id, std::move(resource));
+    if (!inserted) {
+      // Another thread inserted it in the meantime
+      ptr = it->second.get();
+    }
+  }
+
+  return ptr;
+}
 
 }  // namespace stream_executor

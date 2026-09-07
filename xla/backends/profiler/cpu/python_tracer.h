@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,11 +16,18 @@ limitations under the License.
 #define XLA_BACKENDS_PROFILER_CPU_PYTHON_TRACER_H_
 
 #include <memory>
+#include <vector>
 
+#include "xla/python/profiler/internal/python_hooks.h"
 #include "tsl/profiler/lib/profiler_interface.h"
+#include "tsl/profiler/protobuf/xplane.pb.h"
 
 namespace xla {
 namespace profiler {
+
+struct PythonTracerChunk {
+  std::vector<PerThreadConsumeData> consumed_data;
+};
 
 struct PythonTracerOptions {
   // Whether to enable python function calls tracing.

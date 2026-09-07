@@ -783,25 +783,25 @@ def system_specific_test_config(environ_cp):
     if environ_cp.get('TF_NEED_ROCM', None) == '1':
       test_and_build_filters.append('-no_rocm')
 
-  write_to_bazelrc('test --test_tag_filters=%s' %
-                   ','.join(test_and_build_filters + test_only_filters))
-  write_to_bazelrc('test --build_tag_filters=%s' %
-                   ','.join(test_and_build_filters))
-  write_to_bazelrc('build --test_tag_filters=%s' %
-                   ','.join(test_and_build_filters + test_only_filters))
-  write_to_bazelrc('build --build_tag_filters=%s' %
-                   ','.join(test_and_build_filters))
+  # Precompute each distinct joined-filter string once and reuse it below,
+  # instead of rebuilding the same list concatenation + join repeatedly (3x
+  # for the base filters, 3x for filters+test_only) for identical inputs.
+  build_tag_str = ','.join(test_and_build_filters)
+  test_tag_str = ','.join(test_and_build_filters + test_only_filters)
+  v2_build_tag_str = ','.join(test_and_build_filters + ['-v1only'])
+  v2_test_tag_str = ','.join(
+      test_and_build_filters + test_only_filters + ['-v1only'])
+
+  write_to_bazelrc('test --test_tag_filters=%s' % test_tag_str)
+  write_to_bazelrc('test --build_tag_filters=%s' % build_tag_str)
+  write_to_bazelrc('build --test_tag_filters=%s' % test_tag_str)
+  write_to_bazelrc('build --build_tag_filters=%s' % build_tag_str)
 
   # Disable tests with "v1only" tag in "v2" Bazel config, but not in "v1" config
-  write_to_bazelrc('test:v1 --test_tag_filters=%s' %
-                   ','.join(test_and_build_filters + test_only_filters))
-  write_to_bazelrc('test:v1 --build_tag_filters=%s' %
-                   ','.join(test_and_build_filters))
-  write_to_bazelrc(
-      'test:v2 --test_tag_filters=%s' %
-      ','.join(test_and_build_filters + test_only_filters + ['-v1only']))
-  write_to_bazelrc('test:v2 --build_tag_filters=%s' %
-                   ','.join(test_and_build_filters + ['-v1only']))
+  write_to_bazelrc('test:v1 --test_tag_filters=%s' % test_tag_str)
+  write_to_bazelrc('test:v1 --build_tag_filters=%s' % build_tag_str)
+  write_to_bazelrc('test:v2 --test_tag_filters=%s' % v2_test_tag_str)
+  write_to_bazelrc('test:v2 --build_tag_filters=%s' % v2_build_tag_str)
 
 
 def set_system_libs_flag(environ_cp):

@@ -1,4 +1,4 @@
-/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2019 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,23 +20,21 @@ limitations under the License.
 
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/hlo/ir/hlo_opcode.h"
-#include "xla/service/hlo_parser.h"
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
+#include "xla/hlo/testlib/test.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/service/pattern_matcher.h"
-#include "xla/service/pattern_matcher_gmock.h"
-#include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/types.h"
-#include "xla/window_util.h"
-#include "tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace {
 
 namespace m = match;
 
-using AllReduceSimplifierTest = HloTestBase;
+using AllReduceSimplifierTest = HloHardwareIndependentTestBase;
 
 TEST_F(AllReduceSimplifierTest, ReplicatedParameters) {
   const char* kModuleStr = R"(
@@ -79,7 +77,7 @@ test {
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kModuleStr, /*replica_count=*/8));
-  AllReduceSimplifier simplifier(/*replica_count=*/8);
+  AllReduceSimplifier simplifier;
   ASSERT_TRUE(simplifier.Run(module.get()).value());
   EXPECT_THAT(
       module->entry_computation()->root_instruction(),
@@ -115,7 +113,7 @@ test {
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kModuleStr, /*replica_count=*/8));
-  AllReduceSimplifier simplifier(/*replica_count=*/8);
+  AllReduceSimplifier simplifier;
   ASSERT_TRUE(simplifier.Run(module.get()).value());
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               GmockMatch(m::MultiplyAnyOrder(
@@ -156,7 +154,7 @@ test {
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kModuleStr, /*replica_count=*/8));
-  AllReduceSimplifier simplifier(/*replica_count=*/8);
+  AllReduceSimplifier simplifier;
   ASSERT_TRUE(simplifier.Run(module.get()).value());
   EXPECT_THAT(
       module->entry_computation()->root_instruction(),
@@ -186,10 +184,214 @@ test {
 )";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
                                            kModuleStr, /*replica_count=*/8));
-  AllReduceSimplifier simplifier(/*replica_count=*/8);
+  AllReduceSimplifier simplifier;
   EXPECT_TRUE(simplifier.Run(module.get()).value());
   EXPECT_THAT(module->entry_computation()->root_instruction(),
               GmockMatch(m::Parameter(0)));
 }
+
+TEST_F(AllReduceSimplifierTest, TrivialSubgroupNonCrossReplicaAllReduce) {
+  const char* kModuleStr = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+
+test {
+  p0 = f32[8,16] parameter(0), parameter_replication={false}
+  ROOT all-reduce = f32[8,16] all-reduce(p0),
+    channel_id=1,
+    use_global_device_ids=true,
+    replica_groups={{0},{1},{2},{3},{4},{5},{6},{7}},
+    to_apply=sum
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kModuleStr, /*replica_count=*/1,
+                                                /*num_partitions=*/8));
+  module->mutable_config().set_use_spmd_partitioning(true);
+  AllReduceSimplifier simplifier;
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
+TEST_F(AllReduceSimplifierTest, NonCrossReplicaAllReduceAfterAllReduce) {
+  const char* kModuleStr = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+
+test {
+  p0 = f32[8,16] parameter(0), parameter_replication={false}
+  all-reduce = f32[8,16] all-reduce(p0),
+    channel_id=1,
+    use_global_device_ids=true,
+    replica_groups={{0,2},{1,3},{4,6},{5,7}},
+    to_apply=sum
+  ROOT all-reduce.1 = f32[8,16] all-reduce(all-reduce),
+    channel_id=2,
+    use_global_device_ids=true,
+    replica_groups={{0,4},{1,5},{2,6},{3,7}},
+    to_apply=sum
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kModuleStr, /*replica_count=*/1,
+                                                /*num_partitions=*/8));
+  module->mutable_config().set_use_spmd_partitioning(true);
+  AllReduceSimplifier simplifier;
+  EXPECT_FALSE(simplifier.Run(module.get()).value());
+}
+
+TEST_F(AllReduceSimplifierTest, MPMDNonCrossReplicaAllReduce) {
+  const char* kModuleStr = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add.2 = f32[] add(a, b)
+}
+
+test {
+  p0 = f32[8,16] parameter(0), parameter_replication={false}
+  ROOT all-reduce = f32[8,16] all-reduce(p0),
+    channel_id=1,
+    replica_groups={{0},{1}},
+    to_apply=sum
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kModuleStr, /*replica_count=*/2,
+                                                /*num_partitions=*/1));
+  // Mark as MPMD.
+  module->mutable_config().set_use_spmd_partitioning(false);
+  AllReduceSimplifier simplifier;
+  EXPECT_FALSE(simplifier.Run(module.get()).value());
+}
+
+TEST_F(AllReduceSimplifierTest, AllGatherSameInputOutputShape) {
+  const char* kModuleStr = R"(
+HloModule m
+
+test {
+  p0 = f32[8,16] parameter(0)
+  ROOT all-gather = f32[8,16] all-gather(p0), dimensions={0},
+    replica_groups={{0},{1},{2},{3},{4},{5},{6},{7}}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kModuleStr, /*replica_count=*/8));
+  AllReduceSimplifier simplifier;
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
+TEST_F(AllReduceSimplifierTest, ReduceScatterSameInputOutputShape) {
+  const char* kModuleStr = R"(
+HloModule m
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT add = f32[] add(a, b)
+}
+
+test {
+  p0 = f32[8,16] parameter(0)
+  ROOT reduce-scatter = f32[8,16] reduce-scatter(p0), dimensions={0},
+    replica_groups={{0},{1},{2},{3},{4},{5},{6},{7}}, to_apply=sum
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kModuleStr, /*replica_count=*/8));
+  AllReduceSimplifier simplifier;
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
+TEST_F(AllReduceSimplifierTest, ReplicatedParameterWithOr) {
+  const char* kModuleStr = R"(
+HloModule m
+
+or {
+  a = pred[] parameter(0)
+  b = pred[] parameter(1)
+  ROOT or = pred[] or(a, b)
+}
+
+test {
+  p0 = pred[8,16] parameter(0), parameter_replication={true}
+  ROOT all-reduce = pred[8,16] all-reduce(p0), replica_groups={}, to_apply=or
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kModuleStr, /*replica_count=*/8));
+  AllReduceSimplifier simplifier;
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
+TEST_F(AllReduceSimplifierTest, ReplicatedParameterWithAnd) {
+  const char* kModuleStr = R"(
+HloModule m
+
+and {
+  a = pred[] parameter(0)
+  b = pred[] parameter(1)
+  ROOT and = pred[] and(a, b)
+}
+
+test {
+  p0 = pred[8,16] parameter(0), parameter_replication={true}
+  ROOT all-reduce = pred[8,16] all-reduce(p0), replica_groups={}, to_apply=and
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kModuleStr, /*replica_count=*/8));
+  AllReduceSimplifier simplifier;
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
+TEST_F(AllReduceSimplifierTest, AsyncAllGatherSameInputOutputShape) {
+  const char* kModuleStr = R"(
+HloModule m
+
+async_all_gather {
+  p0 = f32[8,16] parameter(0)
+  ROOT all-gather = f32[8,16] all-gather(p0), dimensions={0},
+    replica_groups={{0},{1},{2},{3},{4},{5},{6},{7}}
+}
+
+ENTRY test {
+  p = f32[8,16] parameter(0)
+  async-start = ((f32[8,16]), f32[8,16], u32[]) async-start(p), calls=async_all_gather
+  ROOT async-done = f32[8,16] async-done(async-start), calls=async_all_gather
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(
+                                           kModuleStr, /*replica_count=*/8));
+  AllReduceSimplifier simplifier;
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, simplifier.Run(module.get()));
+  EXPECT_TRUE(changed);
+  EXPECT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Parameter(0)));
+}
+
 }  // namespace
 }  // namespace xla

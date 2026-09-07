@@ -1,4 +1,4 @@
-/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2018 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,25 +15,40 @@ limitations under the License.
 
 #include "xla/service/hlo_creation_utils.h"
 
+#include <cstdint>
 #include <memory>
 
+#include <gtest/gtest.h>
+#include "absl/log/check.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/array2d.h"
 #include "xla/hlo/evaluator/hlo_evaluator.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
+#include "xla/hlo/testlib/test.h"
+#include "xla/hlo/testlib/verified_hlo_module.h"
+#include "xla/literal.h"
+#include "xla/literal_util.h"
 #include "xla/service/pattern_matcher.h"
-#include "xla/service/pattern_matcher_gmock.h"
+#include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/tests/literal_test_util.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace {
 
 namespace m = match;
 
-class HloCreationUtilsTest : public HloTestBase {
+class HloCreationUtilsTest : public HloHardwareIndependentTestBase {
  protected:
   std::unique_ptr<VerifiedHloModule> CreateModuleWithProgramShape(
       PrimitiveType primitive_type, absl::Span<const int64_t> input_shape_dims,
@@ -372,6 +387,7 @@ TEST_F(HloCreationUtilsTest, MaybeMakeTupleTuplizesMultipleOperands) {
   Literal expected_result = LiteralUtil::MakeTuple({&input1, &input0});
   EXPECT_EQ(result_literal, expected_result);
 }
+
 TEST_F(HloCreationUtilsTest, DynamicUpdateSliceVectorStartIndices) {
   auto module = CreateNewVerifiedModule("dus-creation-test");
   // arg:
@@ -485,5 +501,110 @@ TEST_F(HloCreationUtilsTest, ReduceWindow) {
             expected_output_shape);
 }
 
+TEST_F(HloCreationUtilsTest, ReduceWindowBinaryOpcode) {
+  const Shape scalar_shape = ShapeUtil::MakeShape(S32, {});
+  std::unique_ptr<HloModule> module = CreateNewVerifiedModule();
+
+  auto builder = HloComputation::Builder(TestName());
+  Shape input_shape = ShapeUtil::MakeShape(F32, {2, 4, 4});
+  Shape expected_output_shape = ShapeUtil::MakeShape(F32, {2, 2, 2});
+
+  Window window;
+  // First dimension is unchanged.
+  WindowDimension* batch_dim = window.add_dimensions();
+  batch_dim->set_size(1);
+  batch_dim->set_stride(1);
+  batch_dim->set_padding_low(0);
+  batch_dim->set_padding_high(0);
+  batch_dim->set_window_dilation(1);
+  batch_dim->set_base_dilation(1);
+
+  // Second and third dimension are reduced.
+  for (int64_t i = 0; i < 2; ++i) {
+    WindowDimension* dim = window.add_dimensions();
+    dim->set_size(2);
+    dim->set_stride(2);
+    dim->set_padding_low(0);
+    dim->set_padding_high(0);
+    dim->set_window_dilation(1);
+    dim->set_base_dilation(1);
+  }
+
+  auto* a_param = builder.AddInstruction(HloInstruction::CreateParameter(
+      /*parameter_number=*/0, input_shape, "A"));
+
+  auto init = builder.AddInstruction(
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(0.0)));
+  module->AddEntryComputation(builder.Build());
+  TF_ASSERT_OK_AND_ASSIGN(
+      HloInstruction * reduce_window,
+      MakeReduceWindowHlo(a_param, init, window, HloOpcode::kAdd));
+  module->entry_computation()->set_root_instruction(
+      reduce_window,
+      /*accept_different_shape=*/true);
+
+  *module->mutable_entry_computation_layout() =
+      module->compute_computation_layout();
+  EXPECT_EQ(module->entry_computation()->root_instruction()->shape(),
+            expected_output_shape);
+}
+
+TEST_F(HloCreationUtilsTest, DynamicBroadcastShape) {
+  HloInstruction* param;
+  HloComputation* entry_computation;
+
+  auto module = CreateModuleWithProgramShape(F32, /*input_shape_dims=*/{10},
+                                             /*output_shape_dims=*/{10}, &param,
+                                             &entry_computation);
+  param->mutable_shape()->set_dynamic_dimension(0, true);
+
+  HloInstruction* one_constant = MakeScalarLike(param, 1.0f);
+  // Broadcasts should always have a static shape that is inferred.
+  EXPECT_TRUE(one_constant->shape().is_static());
+}
+
+TEST_F(HloCreationUtilsTest, NewModuleWithFusion) {
+  static constexpr absl::string_view kModuleStr = R"(
+    HloModule test
+    apply_op {
+      x = f32[] parameter(0)
+      y = f32[] parameter(1)
+      ROOT apply_op = f32[] add(x, y)
+    }
+
+    ENTRY test_computation {
+      param_0 = f32[65536] parameter(0)
+      all-reduce-start = f32[65536] all-reduce-start(param_0), to_apply=apply_op, replica_groups={{0,1}}
+      ROOT all-reduce-done = f32[65536] all-reduce-done(all-reduce-start)
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kModuleStr));
+  const HloInstruction* all_reduce_start =
+      module->entry_computation()->GetInstructionWithName("all-reduce-start");
+  std::unique_ptr<HloModule> fusion_module =
+      NewModuleWithFusion(all_reduce_start, HloInstruction::FusionKind::kLoop);
+  EXPECT_EQ(fusion_module->entry_computation()->root_instruction()->opcode(),
+            HloOpcode::kFusion);
+  auto* fusion_instruction = Cast<HloFusionInstruction>(
+      fusion_module->entry_computation()->root_instruction());
+  EXPECT_EQ(fusion_instruction->fusion_kind(),
+            HloInstruction::FusionKind::kLoop);
+  EXPECT_EQ(fusion_instruction->fused_instructions_computation()
+                ->root_instruction()
+                ->opcode(),
+            HloOpcode::kAllReduceStart);
+  HloAllReduceInstruction* all_reduce = Cast<HloAllReduceInstruction>(
+      fusion_instruction->fused_instructions_computation()->root_instruction());
+  EXPECT_EQ(all_reduce->replica_groups().size(), 1);
+  EXPECT_EQ(all_reduce->replica_groups()[0].replica_ids().size(), 2);
+  // Check that all-reduce has the correct to_apply.
+  HloComputation* to_apply = all_reduce->to_apply();
+  EXPECT_EQ(to_apply->name(), "apply_op");
+  EXPECT_EQ(to_apply->num_parameters(), 2);
+  EXPECT_EQ(to_apply->root_instruction()->opcode(), HloOpcode::kAdd);
+  EXPECT_EQ(fusion_module->entry_computation()->root_instruction()->name(),
+            absl::StrCat(all_reduce_start->name(), "-", "fusion"));
+}
 }  // namespace
 }  // namespace xla

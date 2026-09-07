@@ -1,4 +1,4 @@
-/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2019 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,13 +18,16 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 
-#include "xla/test.h"
+#include <gtest/gtest.h>
+#include "absl/status/status_matchers.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/types.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace {
 
+using ::absl_testing::IsOkAndHolds;
 using ::testing::Eq;
 
 TEST(Comparison, FloatsDefaultToPartialOrder) {
@@ -173,6 +176,28 @@ TEST(Comparison, ToString) {
   EXPECT_EQ(Comparison(Comparison::Direction::kGe, PrimitiveType::C128)
                 .ToString("_1_", "_2_", "_3_"),
             "_1_GE_2_C128_3_PARTIALORDER");
+}
+
+TEST(Comparison, ComparisonOrderToString) {
+  EXPECT_EQ(ComparisonOrderToString(Comparison::Order::kTotal), "TOTALORDER");
+  EXPECT_EQ(ComparisonOrderToString(Comparison::Order::kPartial),
+            "PARTIALORDER");
+}
+
+TEST(Comparison, ComparisonOrderToShortString) {
+  EXPECT_EQ(ComparisonOrderToShortString(Comparison::Order::kTotal), "TOTAL");
+  EXPECT_EQ(ComparisonOrderToShortString(Comparison::Order::kPartial),
+            "PARTIAL");
+}
+
+TEST(Comparison, ShortStringToComparisonOrder) {
+  EXPECT_THAT(ShortStringToComparisonOrder("TOTAL"),
+              IsOkAndHolds(Comparison::Order::kTotal));
+  EXPECT_THAT(ShortStringToComparisonOrder("PARTIAL"),
+              IsOkAndHolds(Comparison::Order::kPartial));
+  EXPECT_FALSE(ShortStringToComparisonOrder("TOTALORDER").ok());
+  EXPECT_FALSE(ShortStringToComparisonOrder("PARTIALORDER").ok());
+  EXPECT_FALSE(ShortStringToComparisonOrder("INVALID").ok());
 }
 
 TEST(Comparison, TotalOrderFloatComparison) {

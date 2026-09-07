@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,22 +24,23 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
-#include "absl/types/optional.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/hlo.pb.h"
-#include "xla/status.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/types.h"
+#include "xla/tsl/profiler/convert/xla_op_utils.h"
+#include "xla/tsl/profiler/utils/file_system_utils.h"
+#include "xla/tsl/profiler/utils/tf_xplane_visitor.h"
+#include "xla/tsl/profiler/utils/xplane_schema.h"
+#include "xla/tsl/profiler/utils/xplane_utils.h"
+#include "xla/tsl/profiler/utils/xplane_visitor.h"
 #include "xla/xla.pb.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/types.h"
-#include "tsl/profiler/convert/xla_op_utils.h"
+#include "tsl/platform/protobuf.h"
+#include "tsl/profiler/protobuf/profiled_instructions.pb.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
-#include "tsl/profiler/utils/file_system_utils.h"
-#include "tsl/profiler/utils/tf_xplane_visitor.h"
-#include "tsl/profiler/utils/xplane_schema.h"
-#include "tsl/profiler/utils/xplane_utils.h"
-#include "tsl/profiler/utils/xplane_visitor.h"
 
 namespace xla {
 namespace {
@@ -69,12 +70,12 @@ void GetXPlaneLatencyInfo(
     absl::flat_hash_map<std::string, HloLatencyInfo>* hlo_latency_info) {
   // Iterate events.
   xplane.ForEachLine([hlo_latency_info,
-                      hlo_module_info](const XLineVisitor& xline) {
+                      &hlo_module_info](const XLineVisitor& xline) {
     if (xline.DisplayName() == tsl::profiler::kXlaAsyncOpLineName) {
       return;
     }
     xline.ForEachEvent([hlo_latency_info,
-                        hlo_module_info](const XEventVisitor& xevent) {
+                        &hlo_module_info](const XEventVisitor& xevent) {
       int64_t event_type =
           xevent.Type().value_or(HostEventType::kUnknownHostEventType);
       if (IsInternalEvent(event_type)) return;
@@ -117,7 +118,7 @@ void GetXPlaneLatencyInfo(
       if (fingerprint.has_value()) {
         key = absl::StrCat(fingerprint.value(), kCostNameSep, hlo_name.value());
       }
-      (*hlo_latency_info)[key].durations.emplace_back(latency);
+      (*hlo_latency_info)[key].durations.push_back(latency);
     });
   });
 }
@@ -177,12 +178,12 @@ void GetXPlaneHloModuleInfo(
 
 }  // namespace
 
-Status ConvertXplaneToProfiledInstructionsProto(
+absl::Status ConvertXplaneUnderLogdirToProfiledInstructionsProto(
     const std::string& logdir, tensorflow::profiler::ProfiledInstructionsProto*
                                    profiled_instructions_proto) {
   // Find the xplane files for each host under logdir.
   std::vector<std::string> children_path;
-  TF_RETURN_IF_ERROR(tsl::Env::Default()->GetChildren(logdir, &children_path));
+  ABSL_RETURN_IF_ERROR(tsl::Env::Default()->GetChildren(logdir, &children_path));
   if (children_path.empty()) {
     return absl::NotFoundError(
         absl::StrCat("Could not find file under: ", logdir));
@@ -192,13 +193,20 @@ Status ConvertXplaneToProfiledInstructionsProto(
     if (absl::StrContains(child_path, kXPlanePb)) {
       std::string xspace_path = ProfilerJoinPath(logdir, child_path);
       tensorflow::profiler::XSpace xspace;
-      TF_RETURN_IF_ERROR(
+      ABSL_RETURN_IF_ERROR(
           ReadBinaryProto(tsl::Env::Default(), xspace_path, &xspace));
-      xspaces.emplace_back(xspace);
+      xspaces.push_back(xspace);
     }
   }
 
-  // Gets the duration information for each hlo.
+  return ConvertXplaneToProfiledInstructionsProto(std::move(xspaces),
+                                                  profiled_instructions_proto);
+}
+
+absl::Status ConvertXplaneToProfiledInstructionsProto(
+    std::vector<tensorflow::profiler::XSpace> xspaces,
+    tensorflow::profiler::ProfiledInstructionsProto*
+        profiled_instructions_proto) {
   absl::flat_hash_map<std::string, HloLatencyInfo> hlo_latency_info;
   absl::flat_hash_map<std::string, std::string> hlo_module_info;
   // Iterate through each host.
@@ -237,7 +245,7 @@ Status ConvertXplaneToProfiledInstructionsProto(
     cost->set_name(iter.first);
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace xla

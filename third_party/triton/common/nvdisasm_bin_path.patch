@@ -1,0 +1,39 @@
+# Copyright 2026 The OpenXLA Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+--- a/python/triton/tools/disasm.py
++++ b/python/triton/tools/disasm.py
+@@ -79,13 +79,19 @@ def path_to_cuobjdump():
+     from triton import knobs
+     return knobs.nvidia.cuobjdump.path
+ 
++def path_to_nvdisasm():
++    from triton import knobs
++    return knobs.nvidia.nvdisasm.path
++
+ 
+ def extract(file_path, fun):
+     cuobjdump = path_to_cuobjdump()
++    env = os.environ.copy()
++    env["NVDISASM_PATH"] = os.path.dirname(path_to_nvdisasm())
+     if fun is None:
+-        sass_str = subprocess.check_output([cuobjdump, "-sass", file_path])
++        sass_str = subprocess.check_output([cuobjdump, "-sass", file_path], env=env)
+     else:
+-        sass_str = subprocess.check_output([cuobjdump, "-fun", fun, "-sass", file_path])
++        sass_str = subprocess.check_output([cuobjdump, "-fun", fun, "-sass", file_path], env=env)
+     sass_lines = sass_str.splitlines()
+     line_idx = 0
+     while line_idx < len(sass_lines):
+

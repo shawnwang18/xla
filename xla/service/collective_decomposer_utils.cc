@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ limitations under the License.
 namespace xla {
 
 // Create the start indices for decompositing the given collective.
-StatusOr<std::vector<HloInstruction *>>
+absl::StatusOr<std::vector<HloInstruction *>>
 CreateStartIndicesForCollectiveDecomposition(
     CollectiveOpGroupMode group_mode,
     absl::Span<const ReplicaGroup> replica_groups, const Shape &shard_shape,
@@ -41,7 +41,8 @@ CreateStartIndicesForCollectiveDecomposition(
   if (update_layout) {
     update_layout(*zero->mutable_shape());
   }
-  std::vector<HloInstruction *> start_indices(shard_shape.rank(), zero);
+  std::vector<HloInstruction *> start_indices(shard_shape.dimensions().size(),
+                                              zero);
   const Shape &scalar_shape = zero->shape();
 
   auto create_flattened_id = [&](HloInstruction *replica_index) {
@@ -63,11 +64,12 @@ CreateStartIndicesForCollectiveDecomposition(
 
   HloInstruction *participant_id;
   switch (group_mode) {
-    case CollectiveOpGroupMode::kCrossReplica:
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA:
       participant_id =
           computation->AddInstruction(HloInstruction::CreateReplicaId());
       break;
-    case CollectiveOpGroupMode::kCrossReplicaAndPartition:
+    case CollectiveOpGroupMode::
+        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION:
       // For this mode, the replica groups contain replica_id's, but the
       // participant are replicas with the given replica_id across all
       // partitions (ordered in partition id order, see
@@ -81,14 +83,18 @@ CreateStartIndicesForCollectiveDecomposition(
       participant_id =
           computation->AddInstruction(HloInstruction::CreateReplicaId());
       break;
-    case CollectiveOpGroupMode::kCrossPartition:
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_CROSS_PARTITION:
       participant_id =
           computation->AddInstruction(HloInstruction::CreatePartitionId());
       break;
-    case CollectiveOpGroupMode::kFlattenedID:
+    case CollectiveOpGroupMode::COLLECTIVE_OP_GROUP_MODE_FLATTENED_ID:
       participant_id = create_flattened_id(
           computation->AddInstruction(HloInstruction::CreateReplicaId()));
       break;
+    default: {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported group mode: ", group_mode));
+    }
   }
 
   auto is_trivial_group = [](absl::Span<const ReplicaGroup> replica_groups) {
@@ -151,7 +157,8 @@ CreateStartIndicesForCollectiveDecomposition(
 
   // For cross-replica and partition mode, we need to scale the index (which is
   // the replica index) by num_partitions and add partition_id;
-  if (group_mode == CollectiveOpGroupMode::kCrossReplicaAndPartition) {
+  if (group_mode == CollectiveOpGroupMode::
+                        COLLECTIVE_OP_GROUP_MODE_CROSS_REPLICA_AND_PARTITION) {
     index = create_flattened_id(index);
   }
 

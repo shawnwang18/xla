@@ -1,4 +1,4 @@
-/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2015 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,11 +15,9 @@ limitations under the License.
 
 #include "xla/stream_executor/platform.h"
 
-#include "absl/strings/str_cat.h"
-#include "xla/stream_executor/platform/logging.h"
-#include "xla/stream_executor/platform/port.h"
-#include "xla/stream_executor/stream_executor_pimpl.h"
-#include "tsl/platform/errors.h"
+#include <string>
+
+#include "absl/status/status.h"
 
 namespace stream_executor {
 
@@ -34,23 +32,8 @@ std::string StreamPriorityToString(StreamPriority priority) {
   }
 }
 
-StreamExecutorConfig::StreamExecutorConfig()
-    : ordinal(-1), device_options(DeviceOptions::Default()) {}
-
-StreamExecutorConfig::StreamExecutorConfig(int ordinal_in)
-    : ordinal(ordinal_in), device_options(DeviceOptions::Default()) {}
-
-Platform::~Platform() {}
-
 bool Platform::Initialized() const { return true; }
 
-tsl::Status Platform::Initialize(
-    const std::map<std::string, std::string> &platform_options) {
-  if (!platform_options.empty()) {
-    return tsl::Status(absl::StatusCode::kUnimplemented,
-                       "this platform does not support custom initialization");
-  }
-  return ::tsl::OkStatus();
-}
+absl::Status Platform::Initialize() { return absl::OkStatus(); }
 
 }  // namespace stream_executor

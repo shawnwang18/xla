@@ -1,40 +1,33 @@
+# Copyright 2026 The OpenXLA Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 diff --git a/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel b/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel
-index 2b88729d748b..e12d979b4908 100644
 --- a/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel
 +++ b/utils/bazel/llvm-project-overlay/llvm/BUILD.bazel
-@@ -207,13 +207,15 @@ cc_library(
-         "lib/Support/BLAKE3/llvm_blake3_prefix.h",
-     ] + select({
+@@ -430,7 +430,8 @@
          "@platforms//cpu:aarch64": [
--            "lib/Support/BLAKE3/blake3_neon.c",
-+            # TODO(b/234415414): temporary disabled
-+            #            "lib/Support/BLAKE3/blake3_neon.c",
+             "lib/Support/BLAKE3/blake3_neon.c",
          ],
-         "@platforms//cpu:x86_64": [
--            "lib/Support/BLAKE3/blake3_avx2_x86-64_unix.S",
--            "lib/Support/BLAKE3/blake3_avx512_x86-64_unix.S",
--            "lib/Support/BLAKE3/blake3_sse2_x86-64_unix.S",
--            "lib/Support/BLAKE3/blake3_sse41_x86-64_unix.S",
-+            # TODO(b/234415414): temporary disabled
-+            # "lib/Support/BLAKE3/blake3_avx2_x86-64_unix.S",
-+            # "lib/Support/BLAKE3/blake3_avx512_x86-64_unix.S",
-+            # "lib/Support/BLAKE3/blake3_sse2_x86-64_unix.S",
-+            # "lib/Support/BLAKE3/blake3_sse41_x86-64_unix.S",
-         ],
-         "//conditions:default": [
-         ],
-@@ -238,14 +240,16 @@ cc_library(
-     ],
-     copts = llvm_copts,
-     defines = select({
--        "@platforms//cpu:aarch64": [
--        ],
+-        "@platforms//cpu:x86_64": [":blake3_x86_64_asm"],
 +        # TODO(b/234415414): temporary disabled
-+        #"@platforms//cpu:aarch64": [
-+        #],
++        # "@platforms//cpu:x86_64": [":blake3_x86_64_asm"],
          "//conditions:default": [
-             "BLAKE3_USE_NEON=0",
          ],
+     }),
+@@ -459,8 +460,9 @@
+         ],
+         "//conditions:default": ["BLAKE3_USE_NEON=0"],
      }) + select({
 -        "@platforms//cpu:x86_64": [
 -        ],

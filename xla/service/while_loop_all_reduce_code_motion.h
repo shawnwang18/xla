@@ -1,4 +1,4 @@
-/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2020 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,17 +16,17 @@ limitations under the License.
 #ifndef XLA_SERVICE_WHILE_LOOP_ALL_REDUCE_CODE_MOTION_H_
 #define XLA_SERVICE_WHILE_LOOP_ALL_REDUCE_CODE_MOTION_H_
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/service/hlo_pass_interface.h"
-#include "xla/statusor.h"
+#include "xla/hlo/pass/hlo_pass_interface.h"
 
 namespace xla {
 
-// HLO pass that rewrites while loops to sink all-reduces that are only
-// accumulated into a buffer and not otherwise used in the loop body.
-// An all-reduce instruction can be sinked if its result is only added
-// to a number of accumulation buffers, and the accumulation buffers are not
-// used inside the loop.
+// HLO pass that sinks all-reduce instructions out of while loop bodies.
+// An all-reduce is sunk if its result is ONLY used to accumulate into buffers,
+// and those buffers are not used otherwise inside the loop.
 //
 // Pattern before this pass:
 // a = ...
@@ -34,6 +34,7 @@ namespace xla {
 //   b = ...
 //   c = all-reduce(b)
 //   a += c
+//
 // Pattern after this pass:
 // a = ...
 // d = 0
@@ -42,22 +43,48 @@ namespace xla {
 //   d += b
 // e = all-reduce(d)
 // a += e
+//
+// Additionally sinks all-reduces that are scattered into the loop output,
+// without being used in the loop body.
+// Supported reduction operations: add, mul, min, max.
+//
+// Pattern before this pass:
+// a = while:
+//   b = dynamic-update-slice(output, all-reduce(...), loop_induction_variable)
+// c = get-tuple-element(a, tuple_index)
+//
+// Pattern after this pass:
+// a = while:
+//   b = dynamic-update-slice(output, ..., loop_induction_variable)
+// c = all-reduce(get-tuple-element(a, tuple_index))
 class WhileLoopAllReduceCodeMotion : public HloModulePass {
  public:
-  explicit WhileLoopAllReduceCodeMotion(bool enable_reduce_scatter = false)
-      : enable_reduce_scatter_(enable_reduce_scatter) {}
+  explicit WhileLoopAllReduceCodeMotion(bool enable_reduce_scatter = false,
+                                        bool run_setup_passes = false,
+                                        bool require_flat_control_flow = false)
+      : enable_reduce_scatter_(enable_reduce_scatter),
+        run_setup_passes_(run_setup_passes),
+        require_flat_control_flow_(require_flat_control_flow) {}
   ~WhileLoopAllReduceCodeMotion() override = default;
 
-  absl::string_view name() const override {
-    return "while-loop-all-reduce-code-motion";
-  }
-  using HloPassInterface::Run;
-  StatusOr<bool> Run(
+  static constexpr absl::string_view kName =
+      "while-loop-all-reduce-code-motion";
+  absl::string_view name() const override { return kName; }
+
+ protected:
+  absl::StatusOr<bool> RunImpl(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
   const bool enable_reduce_scatter_;
+
+  // Whether to run passes that may setup the add(all-reduce/reduce-scatter,
+  // accumulation_buffer) pattern.
+  const bool run_setup_passes_;
+
+  // Whether to check and require that the call graph for control flow is flat.
+  const bool require_flat_control_flow_;
 };
 }  // namespace xla
 

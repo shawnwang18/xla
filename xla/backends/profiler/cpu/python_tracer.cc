@@ -1,4 +1,4 @@
-/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2020 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,13 +14,20 @@ limitations under the License.
 ==============================================================================*/
 #include "xla/backends/profiler/cpu/python_tracer.h"
 
+#include <any>
+#include <cstddef>
 #include <memory>
+#include <utility>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "xla/python/profiler/internal/python_hooks.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/macros.h"
-#include "tsl/platform/status.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/profiler/utils/xplane_builder.h"
+#include "xla/tsl/profiler/utils/xplane_schema.h"
+#include "xla/tsl/profiler/utils/xplane_utils.h"
 #include "tsl/profiler/lib/profiler_interface.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
@@ -35,51 +42,117 @@ class PythonTracer : public tsl::profiler::ProfilerInterface {
       : options_(options) {}
   ~PythonTracer() override;
 
-  tsl::Status Start() override;  // TENSORFLOW_STATUS_OK
+  absl::Status Start() override;  // TENSORFLOW_STATUS_OK
 
-  tsl::Status Stop() override;  // TENSORFLOW_STATUS_OK
+  absl::Status Stop() override;  // TENSORFLOW_STATUS_OK
 
-  tsl::Status CollectData(  // TENSORFLOW_STATUS_OK
+  absl::Status CollectData(  // TENSORFLOW_STATUS_OK
       tensorflow::profiler::XSpace* space) override;
+
+  absl::StatusOr<tsl::profiler::ConsumeResult> Consume() override;
+
+  absl::Status Serialize(std::any data,
+                         tensorflow::profiler::XSpace* space) override;
 
  private:
   bool recording_ = false;
   const PythonHooksOptions options_;
   std::unique_ptr<PythonHookContext> context_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PythonTracer);
+  PythonTracer(const PythonTracer&) = delete;
+  void operator=(const PythonTracer&) = delete;
 };
 
 PythonTracer::~PythonTracer() { Stop().IgnoreError(); }  // NOLINT
 
-tsl::Status PythonTracer::Start() {  // TENSORFLOW_STATUS_OK
+absl::Status PythonTracer::Start() {  // TENSORFLOW_STATUS_OK
   if (recording_) {
-    return tsl::errors::Internal("PythonTracer already started");
+    return absl::InternalError("PythonTracer already started");
   }
   VLOG(1) << __FUNCTION__;
   recording_ = true;
   PythonHooks::GetSingleton()->Start(options_);
-  return tsl::OkStatus();
+  return absl::OkStatus();
 }
 
-tsl::Status PythonTracer::Stop() {  // TENSORFLOW_STATUS_OK
+absl::Status PythonTracer::Stop() {  // TENSORFLOW_STATUS_OK
   if (!recording_) {
-    return tsl::errors::Internal("PythonTracer not started");
+    return absl::InternalError("PythonTracer not started");
   }
   VLOG(1) << __FUNCTION__;
   context_ = PythonHooks::GetSingleton()->Stop();
   recording_ = false;
-  return tsl::OkStatus();
+  return absl::OkStatus();
 }
 
-tsl::Status PythonTracer::CollectData(  // TENSORFLOW_STATUS_OK
+absl::Status PythonTracer::CollectData(  // TENSORFLOW_STATUS_OK
     tensorflow::profiler::XSpace* space) {
   VLOG(2) << "Collecting data to XSpace from PythonTracer.";
   if (context_) {
     context_->Finalize(space);
     context_.reset();
   }
-  return tsl::OkStatus();
+  return absl::OkStatus();
+}
+
+absl::StatusOr<tsl::profiler::ConsumeResult> PythonTracer::Consume() {
+  VLOG(1) << "PythonTracer::Consume called, recording=" << recording_;
+  PythonTracerChunk chunk;
+  if (recording_) {
+    chunk.consumed_data = PythonHooks::GetSingleton()->Consume();
+  } else if (context_) {
+    if (Py_IsInitialized()) {
+      PyGILState_STATE gil_state = PyGILState_Ensure();
+      chunk.consumed_data = context_->Consume();
+      PyGILState_Release(gil_state);
+    }
+  }
+
+  size_t estimated_size = 0;
+  size_t total_events = 0;
+  for (const auto& thread_data : chunk.consumed_data) {
+    estimated_size += sizeof(PerThreadConsumeData) +
+                      thread_data.events.size() * sizeof(TraceEventInfo);
+    total_events += thread_data.events.size();
+  }
+  VLOG(1) << "PythonTracer::Consume: consumed " << chunk.consumed_data.size()
+          << " threads with " << total_events << " events, estimated size "
+          << estimated_size << " bytes.";
+
+  tsl::profiler::ConsumeResult result;
+  result.data = std::make_any<PythonTracerChunk>(std::move(chunk));
+  result.estimated_size_bytes = estimated_size;
+  return result;
+}
+
+absl::Status PythonTracer::Serialize(std::any data,
+                                     tensorflow::profiler::XSpace* space) {
+  VLOG(1) << "PythonTracer::Serialize called";
+  TF_RET_CHECK(space != nullptr) << "XSpace pointer cannot be null.";
+  PythonTracerChunk* chunk = std::any_cast<PythonTracerChunk>(&data);
+  TF_RET_CHECK(chunk != nullptr) << "Invalid data type passed to Serialize.";
+  if (chunk->consumed_data.empty()) {
+    VLOG(1) << "PythonTracer::Serialize: consumed_data is empty, doing nothing";
+    return absl::OkStatus();
+  }
+
+  tensorflow::profiler::XPlane* raw_plane =
+      tsl::profiler::FindOrAddMutablePlaneWithName(
+          space, tsl::profiler::kPythonTracerPlaneName);
+  tsl::profiler::XPlaneBuilder plane(raw_plane);
+
+  for (const auto& thread_data : chunk->consumed_data) {
+    tsl::profiler::XLineBuilder line =
+        plane.GetOrCreateLine(thread_data.thread_id);
+    for (const auto& event : thread_data.events) {
+      tsl::profiler::XEventBuilder xevent =
+          line.AddEvent(*plane.GetOrCreateEventMetadata(event.name));
+      xevent.SetTimestampNs(event.start_time_ns);
+      xevent.SetEndTimestampNs(event.end_time_ns);
+    }
+  }
+  chunk->consumed_data.clear();
+  return absl::OkStatus();
 }
 
 }  // namespace

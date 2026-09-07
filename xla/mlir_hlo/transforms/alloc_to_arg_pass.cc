@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,13 +15,15 @@ limitations under the License.
 
 // This files implements a pass that partially bufferized IR.
 
-#include <cstdint>
-#include <memory>
 #include <tuple>
 #include <utility>
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Casting.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
 #include "transforms/passes.h"
 
@@ -67,7 +69,11 @@ void AllocToArgPass::runOnOperation() {
     if (auto allocOp = llvm::dyn_cast_or_null<memref::AllocOp>(resultDef)) {
       resultsToErase.set(i);
       auto attrs = funcOp.getResultAttrDict(i);
-      funcOp.insertArgument(funcOp.getNumArguments(), resultTy, attrs, loc);
+
+      if (failed(funcOp.insertArgument(funcOp.getNumArguments(), resultTy,
+                                       attrs, loc))) {
+        return signalPassFailure();
+      }
       rewriter.replaceOp(allocOp, funcOp.getArguments().back());
       continue;
     }
@@ -75,18 +81,21 @@ void AllocToArgPass::runOnOperation() {
     // Case: shape-expanded alloc.
     if (auto expandOp =
             llvm::dyn_cast_or_null<memref::ExpandShapeOp>(resultDef)) {
-      Operation *expandDef = expandOp.getOperand().getDefiningOp();
+      Operation *expandDef = expandOp.getOperand(0).getDefiningOp();
       if (auto allocOp = llvm::dyn_cast_or_null<memref::AllocOp>(expandDef)) {
         resultsToErase.set(i);
         auto attrs = funcOp.getResultAttrDict(i);
-        funcOp.insertArgument(funcOp.getNumArguments(), resultTy, attrs, loc);
+        if (failed(funcOp.insertArgument(funcOp.getNumArguments(), resultTy,
+                                         attrs, loc))) {
+          return signalPassFailure();
+        }
 
         // Collapse buffer argument to replace possible uses of the unexpanded
         // buffer.
         rewriter.setInsertionPoint(allocOp);
         Value arg = funcOp.getArguments().back();
-        Value collapsedArg = rewriter.create<memref::CollapseShapeOp>(
-            loc, arg, expandOp.getReassociationIndices());
+        Value collapsedArg = memref::CollapseShapeOp::create(
+            rewriter, loc, arg, expandOp.getReassociationIndices());
 
         // Replace alloc and its expansion.
         rewriter.replaceOp(allocOp, collapsedArg);
@@ -100,12 +109,10 @@ void AllocToArgPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  funcOp.eraseResults(resultsToErase);
+  if (failed(funcOp.eraseResults(resultsToErase))) {
+    return signalPassFailure();
+  }
   returnOp->eraseOperands(resultsToErase);
-}
-
-std::unique_ptr<OperationPass<func::FuncOp>> hlo::createAllocToArgPass() {
-  return std::make_unique<AllocToArgPass>();
 }
 
 }  // namespace mlir
