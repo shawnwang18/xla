@@ -1,0 +1,101 @@
+{
+  "campaign": "bug6811592",
+  "workload": "n4-ga2",
+  "phase": "training",
+  "hardware": {
+    "cluster": "lyris",
+    "nodes": "theia[0254-0256,0258]",
+    "gpu_type": "GB300"
+  },
+  "configuration": {
+    "name": "n4-ga2",
+    "nodes": 4,
+    "ga": 2,
+    "layers": 5,
+    "first_dense": 1,
+    "experts": 128,
+    "fsdp": 4,
+    "ep": 4,
+    "segment": 4,
+    "container": "gitlab-master.nvidia.com:5005/abgoel/paxml-containers@sha256:8b47bdd072c8989ab91fc13c1beae73a633d80657e1ad7abc5d5fe26735c23bd",
+    "directory": "/lustre/fsw/coreai_dlcompiler_ci/shawnw/bugs/6811592/pr50286-rebased-20261013/n4-ga2",
+    "minutes": 70,
+    "run_minutes": 15,
+    "state": "SUBMITTED",
+    "job_id": "3335112",
+    "submitted_at": "2026-10-13T16:30:23.922079+00:00"
+  },
+  "pr_head": "3c5d6db0a29728982cfc2aeda3f003c1fa128f61",
+  "image": "gitlab-master.nvidia.com:5005/abgoel/paxml-containers@sha256:8b47bdd072c8989ab91fc13c1beae73a633d80657e1ad7abc5d5fe26735c23bd",
+  "runs": [
+    {
+      "sequence": 1,
+      "variant": "OFF",
+      "state": "COMPLETED",
+      "directory": "/lustre/fsw/coreai_dlcompiler_ci/shawnw/bugs/6811592/pr50286-rebased-20261013/n4-ga2/outputs/3335112_ga2-n4-l5-recomputeOFF-r1",
+      "started_utc": "2026-10-13T16:34:32.190520+00:00",
+      "job_id": "3335112",
+      "nodes": "theia[0254-0256,0258]",
+      "num_nodes": 4,
+      "ga": 2,
+      "exit_code": 0,
+      "ended_utc": "2026-10-13T16:40:07.130021+00:00",
+      "process_step_wall_seconds": 334.93716964700434,
+      "step_id": "3335112.0"
+    },
+    {
+      "sequence": 2,
+      "variant": "ON",
+      "state": "COMPLETED",
+      "directory": "/lustre/fsw/coreai_dlcompiler_ci/shawnw/bugs/6811592/pr50286-rebased-20261013/n4-ga2/outputs/3335112_ga2-n4-l5-recomputeON-r2",
+      "started_utc": "2026-10-13T16:40:08.312156+00:00",
+      "job_id": "3335112",
+      "nodes": "theia[0254-0256,0258]",
+      "num_nodes": 4,
+      "ga": 2,
+      "exit_code": 0,
+      "ended_utc": "2026-10-13T16:45:03.808175+00:00",
+      "process_step_wall_seconds": 295.49354497100285,
+      "step_id": "3335112.1"
+    },
+    {
+      "sequence": 3,
+      "variant": "ON",
+      "state": "COMPLETED",
+      "directory": "/lustre/fsw/coreai_dlcompiler_ci/shawnw/bugs/6811592/pr50286-rebased-20261013/n4-ga2/outputs/3335112_ga2-n4-l5-recomputeON-r3",
+      "started_utc": "2026-10-13T16:45:06.069089+00:00",
+      "job_id": "3335112",
+      "nodes": "theia[0254-0256,0258]",
+      "num_nodes": 4,
+      "ga": 2,
+      "exit_code": 0,
+      "ended_utc": "2026-10-13T16:49:57.624036+00:00",
+      "process_step_wall_seconds": 291.5525916790066,
+      "step_id": "3335112.2"
+    },
+    {
+      "sequence": 4,
+      "variant": "OFF",
+      "state": "COMPLETED",
+      "directory": "/lustre/fsw/coreai_dlcompiler_ci/shawnw/bugs/6811592/pr50286-rebased-20261013/n4-ga2/outputs/3335112_ga2-n4-l5-recomputeOFF-r4",
+      "started_utc": "2026-10-13T16:50:00.900847+00:00",
+      "job_id": "3335112",
+      "nodes": "theia[0254-0256,0258]",
+      "num_nodes": 4,
+      "ga": 2,
+      "exit_code": 0,
+      "ended_utc": "2026-10-13T16:54:52.247358+00:00",
+      "process_step_wall_seconds": 291.3441206400021,
+      "step_id": "3335112.3"
+    }
+  ],
+  "outcome": "COMPLETED",
+  "measurement": "Unprofiled steps 110\u2013159; OFF/ON/ON/OFF on same nodes. 165 total steps; PGLE enabled.",
+  "runtime_files": [
+    "run-training.py",
+    "run-case.py",
+    "n4-ga2/run-one.sh",
+    "n4-ga2/plan.json"
+  ],
+  "caveat": "This is the reduced bug reproduction, not the full DeepSeek284B benchmark."
+}

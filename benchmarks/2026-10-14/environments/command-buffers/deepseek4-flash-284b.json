@@ -1,0 +1,261 @@
+{
+  "campaign": "command-buffers",
+  "workload": "deepseek4-flash-284b",
+  "phase": "inference",
+  "hardware": {
+    "node": "gb-nvl-053-compute09",
+    "gpu_type": "GB200"
+  },
+  "nodes": 1,
+  "gpus": 4,
+  "architecture": "aarch64",
+  "global_batch": 4,
+  "image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+  "settings": {
+    "CMDBUFFERDUMP": 0,
+    "Driver": 0,
+    "Exclusive": 0,
+    "GDB": 0,
+    "LHS": 1,
+    "NcclDebug": 0,
+    "NcclGraphMix": 1,
+    "NcclLink": 0,
+    "PROFILE": "none",
+    "Sanitizer": 0,
+    "ScaleLaunchQueue": "1x",
+    "XLADUMPS": 0,
+    "_container_source": "explicit",
+    "_explicit_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "_notes": [
+      "Selected image must provide V4 compressed KV/indexer decode support (MaxText reviewed at 2a4988bcf65603f34af24b85a7d57cf0f9862a00); container 43 is not established as compatible.",
+      "dlcluster GB200: 1 node x 4 GB200 GPUs; expert parallelism 4; total decode batch 4."
+    ],
+    "_resolved_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "account": "blackwell",
+    "allocator": "bfc",
+    "baseDir": "results",
+    "bindpcie": 0,
+    "cluster": "dlcluster",
+    "container": null,
+    "cuda_device_max_connections": 0,
+    "custom_mounts": "/home/scratch.shawnw_inf/workload-runs/deepseek4-cb-modes-20261013/run_preflight.py:/tmp/run_preflight.py:ro,/home/scratch.shawnw_inf/workload-runs/deepseek4-cb-modes-20261013/wheels:/tmp/workload-wheels:ro,/home/scratch.shawnw_inf/workload-runs/deepseek4-cb-modes-20261013/stable_inference.py:/tmp/stable_inference.py:ro",
+    "dcn_data": 1,
+    "dcn_expert": 1,
+    "dcn_fsdp": 1,
+    "dcn_fsdp_t": 1,
+    "dcn_pipe": 1,
+    "env_vars": {
+      "DLCLUSTER_STEP_NAME": "deepseek4-cb-modes",
+      "PYTHONUNBUFFERED": "1",
+      "TF_CPP_VMODULE": "",
+      "TF_FORCE_GPU_ALLOW_GROWTH": "true"
+    },
+    "fmha": 1,
+    "framework_source_patches": [],
+    "graph": "AllExceptWhileConditional",
+    "host_memory_gb": null,
+    "ici_auto": 1,
+    "ici_data": 1,
+    "ici_expert": 4,
+    "ici_fsdp": 1,
+    "ici_fsdp_t": 1,
+    "ici_pipe": 1,
+    "ici_seq": 1,
+    "ici_tensor": 1,
+    "ici_tensor_seq": 1,
+    "ici_tensor_t": 1,
+    "inference_aot_mode": "consistent",
+    "inference_aot_runner_sha256": "37c35693bb232fb71ff27944cd61b68bb3c287c9ba1cb5cde2a32144c5e15e64",
+    "inference_mesh_axis": "expert",
+    "jaxlib": 0,
+    "maxtext": "container",
+    "maxtext_config_path": "/opt/maxtext/src/maxtext/configs/base.yml",
+    "maxtext_reviewed_revision": "2a4988bcf65603f34af24b85a7d57cf0f9862a00",
+    "maxtext_runner": "inference",
+    "mem_fraction": 0.9,
+    "mode": "inference",
+    "model": "infer-deepseek4-flash-284b-bf16-1n4g",
+    "nccl": 0,
+    "nodes": 1,
+    "nvte_fused_attn": 1,
+    "overwrite": 1,
+    "partition": "gb200nvl72_preprod",
+    "pgle": 0,
+    "profile_mode": "none",
+    "run": "maxText",
+    "runDir": "maxtext_inference",
+    "runtime_dependency_overrides": "typeguard==2.13.3",
+    "script": "slurm_run.sub",
+    "segment": 1,
+    "steps": 1,
+    "time": 240,
+    "tpn": 4,
+    "validation": "unqualified",
+    "workload_aliases": [
+      "infer-deepseek4-flash-284b-bf16-2n8g",
+      "infer-deepseek4-flash-284b-bf16-4n4g"
+    ],
+    "workload_type": "Inference",
+    "xla_config": "maxtext_gpu_inference"
+  },
+  "original_step": "2497742.6",
+  "off_retry_job": "2507484",
+  "command": [
+    "/usr/bin/python3",
+    "/home/scratch.shawnw_inf/workload-runs/deepseek4-cb-modes-20261013/launch_existing.py",
+    "/home/scratch.shawnw_inf/workload-runs/deepseek4-cb-modes-20261013/results/infer-deepseek4-flash-284b-bf16-1n4g_93b9701a0cdb"
+  ],
+  "modes": [
+    {
+      "mode": "OFF",
+      "provenance": {
+        "mode": "OFF",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer= --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=ALWAYS_UPDATE",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132026 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)\n\nbase_emb_dim: 4096\nbase_num_query_heads: 64\nbase_num_kv_heads: 1\nbase_num_decoder_layers: 43\nbase_mlp_dim: 2048\nbase_moe_mlp_dim: 2048\nvocab_size: 129280\nhead_dim: 512\nqk_rope_head_dim: 64\n\n# --- Standard Defaults ---\nenable_dropout: false\nlogits_via_embedding: false\nnormalization_layer_epsilon: 1.0e-6\n\n# --- V4 Specific Architectural Keys ---\ndecoder_block: \"deepseek4\"\nmhc_expansion_rate: 4\nfirst_num_hash_layers: 3\nindexer_head_dim: 128\nindexer_n_heads: 64\nindexer_topk: 512\n\n# Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.\n# The 44th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.\n# This leaves exactly 43 layers: 3 prefix [0,0,4] + 40 scanned.\n# `compress_ratio=0` uses sliding window attention. In this case, layer (0, 1).\ncompress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]\n\n# --- MoE configuration ---\nmlp_activations: [\"silu\", \"linear\"]\nnum_experts: 256\nnum_experts_per_tok: 6\nmlp_activations_limit: 10\nshared_experts: 1\nrouted_score_func: \"sqrtsoftplus\"\nnorm_topk_prob: true\nrouted_bias: true\nrouted_bias_update_rate: 0.001\nload_balance_loss_weight: 0.0001\nlog_moe_bias_norms: false\nrouted_scaling_factor: 1.5\n\n\n# --- Attention configuration ---\nattention: \"dot_product\"  # use_indexer requires dot_product, or flash with use_tokamax_splash\nattention_type: 'compressed'\nuse_indexer: true\nq_lora_rank: 1024\no_groups: 8\no_lora_rank: 1024\nsliding_window_size: 128\n\n# --- RoPE ---\n# Values below mirror the official HF config.json `rope_scaling`:\n# {\"type\": \"yarn\", \"factor\": 16, \"beta_fast\": 32, \"beta_slow\": 1, \"original_max_position_embeddings\": 65536}.\nrope_type: \"yarn\"\nrope_factor: 16\nbeta_fast: 32\nbeta_slow: 1\nrope_max_timescale: 10000                  # Main RoPE theta\ncompressed_rope_max_timescale: 160000      # Compressed RoPE theta\nmax_position_embeddings: 1048576\noriginal_max_position_embeddings: 65536\n",
+        "compressed_attention_source": "/opt/maxtext/src/maxtext/layers/attention_compressed.py"
+      }
+    },
+    {
+      "mode": "ALWAYS_UPDATE",
+      "provenance": {
+        "mode": "ALWAYS_UPDATE",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=ALWAYS_UPDATE",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132026 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)\n\nbase_emb_dim: 4096\nbase_num_query_heads: 64\nbase_num_kv_heads: 1\nbase_num_decoder_layers: 43\nbase_mlp_dim: 2048\nbase_moe_mlp_dim: 2048\nvocab_size: 129280\nhead_dim: 512\nqk_rope_head_dim: 64\n\n# --- Standard Defaults ---\nenable_dropout: false\nlogits_via_embedding: false\nnormalization_layer_epsilon: 1.0e-6\n\n# --- V4 Specific Architectural Keys ---\ndecoder_block: \"deepseek4\"\nmhc_expansion_rate: 4\nfirst_num_hash_layers: 3\nindexer_head_dim: 128\nindexer_n_heads: 64\nindexer_topk: 512\n\n# Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.\n# The 44th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.\n# This leaves exactly 43 layers: 3 prefix [0,0,4] + 40 scanned.\n# `compress_ratio=0` uses sliding window attention. In this case, layer (0, 1).\ncompress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]\n\n# --- MoE configuration ---\nmlp_activations: [\"silu\", \"linear\"]\nnum_experts: 256\nnum_experts_per_tok: 6\nmlp_activations_limit: 10\nshared_experts: 1\nrouted_score_func: \"sqrtsoftplus\"\nnorm_topk_prob: true\nrouted_bias: true\nrouted_bias_update_rate: 0.001\nload_balance_loss_weight: 0.0001\nlog_moe_bias_norms: false\nrouted_scaling_factor: 1.5\n\n\n# --- Attention configuration ---\nattention: \"dot_product\"  # use_indexer requires dot_product, or flash with use_tokamax_splash\nattention_type: 'compressed'\nuse_indexer: true\nq_lora_rank: 1024\no_groups: 8\no_lora_rank: 1024\nsliding_window_size: 128\n\n# --- RoPE ---\n# Values below mirror the official HF config.json `rope_scaling`:\n# {\"type\": \"yarn\", \"factor\": 16, \"beta_fast\": 32, \"beta_slow\": 1, \"original_max_position_embeddings\": 65536}.\nrope_type: \"yarn\"\nrope_factor: 16\nbeta_fast: 32\nbeta_slow: 1\nrope_max_timescale: 10000                  # Main RoPE theta\ncompressed_rope_max_timescale: 160000      # Compressed RoPE theta\nmax_position_embeddings: 1048576\noriginal_max_position_embeddings: 65536\n",
+        "compressed_attention_source": "/opt/maxtext/src/maxtext/layers/attention_compressed.py"
+      }
+    },
+    {
+      "mode": "SKIP_TEMP",
+      "provenance": {
+        "mode": "SKIP_TEMP",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=SKIP_TEMP",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132026 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)\n\nbase_emb_dim: 4096\nbase_num_query_heads: 64\nbase_num_kv_heads: 1\nbase_num_decoder_layers: 43\nbase_mlp_dim: 2048\nbase_moe_mlp_dim: 2048\nvocab_size: 129280\nhead_dim: 512\nqk_rope_head_dim: 64\n\n# --- Standard Defaults ---\nenable_dropout: false\nlogits_via_embedding: false\nnormalization_layer_epsilon: 1.0e-6\n\n# --- V4 Specific Architectural Keys ---\ndecoder_block: \"deepseek4\"\nmhc_expansion_rate: 4\nfirst_num_hash_layers: 3\nindexer_head_dim: 128\nindexer_n_heads: 64\nindexer_topk: 512\n\n# Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.\n# The 44th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.\n# This leaves exactly 43 layers: 3 prefix [0,0,4] + 40 scanned.\n# `compress_ratio=0` uses sliding window attention. In this case, layer (0, 1).\ncompress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]\n\n# --- MoE configuration ---\nmlp_activations: [\"silu\", \"linear\"]\nnum_experts: 256\nnum_experts_per_tok: 6\nmlp_activations_limit: 10\nshared_experts: 1\nrouted_score_func: \"sqrtsoftplus\"\nnorm_topk_prob: true\nrouted_bias: true\nrouted_bias_update_rate: 0.001\nload_balance_loss_weight: 0.0001\nlog_moe_bias_norms: false\nrouted_scaling_factor: 1.5\n\n\n# --- Attention configuration ---\nattention: \"dot_product\"  # use_indexer requires dot_product, or flash with use_tokamax_splash\nattention_type: 'compressed'\nuse_indexer: true\nq_lora_rank: 1024\no_groups: 8\no_lora_rank: 1024\nsliding_window_size: 128\n\n# --- RoPE ---\n# Values below mirror the official HF config.json `rope_scaling`:\n# {\"type\": \"yarn\", \"factor\": 16, \"beta_fast\": 32, \"beta_slow\": 1, \"original_max_position_embeddings\": 65536}.\nrope_type: \"yarn\"\nrope_factor: 16\nbeta_fast: 32\nbeta_slow: 1\nrope_max_timescale: 10000                  # Main RoPE theta\ncompressed_rope_max_timescale: 160000      # Compressed RoPE theta\nmax_position_embeddings: 1048576\noriginal_max_position_embeddings: 65536\n",
+        "compressed_attention_source": "/opt/maxtext/src/maxtext/layers/attention_compressed.py"
+      }
+    },
+    {
+      "mode": "SKIP_PROFILED",
+      "provenance": {
+        "mode": "SKIP_PROFILED",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=SKIP_PROFILED",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132026 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# Model config for DeepSeek-V4-Flash 284B (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)\n\nbase_emb_dim: 4096\nbase_num_query_heads: 64\nbase_num_kv_heads: 1\nbase_num_decoder_layers: 43\nbase_mlp_dim: 2048\nbase_moe_mlp_dim: 2048\nvocab_size: 129280\nhead_dim: 512\nqk_rope_head_dim: 64\n\n# --- Standard Defaults ---\nenable_dropout: false\nlogits_via_embedding: false\nnormalization_layer_epsilon: 1.0e-6\n\n# --- V4 Specific Architectural Keys ---\ndecoder_block: \"deepseek4\"\nmhc_expansion_rate: 4\nfirst_num_hash_layers: 3\nindexer_head_dim: 128\nindexer_n_heads: 64\nindexer_topk: 512\n\n# Note: Layers (0, 1, 2) are prefix layers as `first_num_hash_layers=3`.\n# The 44th layer (MTP module with compress_ratio=0) has been explicitly dropped for now.\n# This leaves exactly 43 layers: 3 prefix [0,0,4] + 40 scanned.\n# `compress_ratio=0` uses sliding window attention. In this case, layer (0, 1).\ncompress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]\n\n# --- MoE configuration ---\nmlp_activations: [\"silu\", \"linear\"]\nnum_experts: 256\nnum_experts_per_tok: 6\nmlp_activations_limit: 10\nshared_experts: 1\nrouted_score_func: \"sqrtsoftplus\"\nnorm_topk_prob: true\nrouted_bias: true\nrouted_bias_update_rate: 0.001\nload_balance_loss_weight: 0.0001\nlog_moe_bias_norms: false\nrouted_scaling_factor: 1.5\n\n\n# --- Attention configuration ---\nattention: \"dot_product\"  # use_indexer requires dot_product, or flash with use_tokamax_splash\nattention_type: 'compressed'\nuse_indexer: true\nq_lora_rank: 1024\no_groups: 8\no_lora_rank: 1024\nsliding_window_size: 128\n\n# --- RoPE ---\n# Values below mirror the official HF config.json `rope_scaling`:\n# {\"type\": \"yarn\", \"factor\": 16, \"beta_fast\": 32, \"beta_slow\": 1, \"original_max_position_embeddings\": 65536}.\nrope_type: \"yarn\"\nrope_factor: 16\nbeta_fast: 32\nbeta_slow: 1\nrope_max_timescale: 10000                  # Main RoPE theta\ncompressed_rope_max_timescale: 160000      # Compressed RoPE theta\nmax_position_embeddings: 1048576\noriginal_max_position_embeddings: 65536\n",
+        "compressed_attention_source": "/opt/maxtext/src/maxtext/layers/attention_compressed.py"
+      }
+    }
+  ],
+  "measurement": "All steps 101\u2013300 after 100 warmups; per-step slowest synchronized rank; CV <=10% and half-window mean drift <=5% globally and for every rank",
+  "caveat": "OFF decode rejected for instability in both the original run and retry. No valid OFF decode speedup."
+}

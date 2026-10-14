@@ -1,0 +1,161 @@
+{
+  "campaign": "command-buffers",
+  "workload": "gemma3-27b",
+  "phase": "inference",
+  "hardware": {
+    "node": "gb200-nvl4-ts2-81",
+    "gpu_type": "GB200"
+  },
+  "nodes": 1,
+  "gpus": 4,
+  "architecture": "aarch64",
+  "global_batch": 480,
+  "outcome": "FAILED",
+  "allocation_or_job": "2521172",
+  "image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+  "settings": {
+    "CMDBUFFERDUMP": 0,
+    "Driver": 0,
+    "Exclusive": 0,
+    "GDB": 0,
+    "LHS": 1,
+    "NcclDebug": 0,
+    "NcclGraphMix": 1,
+    "NcclLink": 0,
+    "PROFILE": "none",
+    "Sanitizer": 0,
+    "ScaleLaunchQueue": "1x",
+    "XLADUMPS": 0,
+    "_container_source": "explicit",
+    "_explicit_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "_notes": [
+      "Same dlcluster GB200 node; catalog model, batch and mesh retained.",
+      "Four modes serialized, each with 100 warmup and 200 measured steps.",
+      "Skill-owned consistent AOT runner, BF16 dot-product attention, no framework patches."
+    ],
+    "_resolved_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "account": "blackwell",
+    "allocator": "bfc",
+    "baseDir": "results",
+    "bindpcie": 0,
+    "ci_gpus": 4,
+    "ci_kind": "infer",
+    "ci_original_workload": "ci-infer-gemma3-27b-bf16-1n4g",
+    "ci_platforms": "b200_prenyx,b300_bia",
+    "ci_precision": "bf16",
+    "ci_product_hash": "c98248dbcada",
+    "ci_recipe_index": 11,
+    "ci_scope": "perf-infer",
+    "ci_source": "maxtext.yaml:recipe11",
+    "ci_time_limit_seconds": 1200,
+    "ci_variant": "gemma3-27b",
+    "ci_yaml": "maxtext.yaml",
+    "cluster": "dlcluster",
+    "container": 43,
+    "cuda_device_max_connections": 0,
+    "dcn_data": 1,
+    "dcn_expert": 1,
+    "dcn_fsdp": 1,
+    "dcn_fsdp_t": 1,
+    "dcn_pipe": 1,
+    "env_vars": {
+      "EXPECTED_BATCH": "480",
+      "EXPECTED_LAYERS": "62",
+      "EXPECTED_MODEL": "gemma3-27b",
+      "PYTHONUNBUFFERED": "1",
+      "SUITE_ROOT": "/home/scratch.shawnw_inf/workload-runs/inference-cb-suite-20261013",
+      "TF_CPP_VMODULE": "",
+      "TF_FORCE_GPU_ALLOW_GROWTH": "true"
+    },
+    "fmha": 1,
+    "graph": "CGOFF",
+    "host_memory_gb": null,
+    "ici_auto": 1,
+    "ici_data": 1,
+    "ici_expert": 1,
+    "ici_fsdp": 4,
+    "ici_fsdp_t": 1,
+    "ici_pipe": 1,
+    "ici_seq": 1,
+    "ici_tensor": 1,
+    "ici_tensor_seq": 1,
+    "ici_tensor_t": 1,
+    "inference_aot_mode": "consistent",
+    "inference_aot_runner_sha256": "37c35693bb232fb71ff27944cd61b68bb3c287c9ba1cb5cde2a32144c5e15e64",
+    "jaxlib": 0,
+    "maxtext": "container",
+    "maxtext_config_path": "/opt/maxtext/src/maxtext/configs/base.yml",
+    "maxtext_runner": "inference",
+    "mem_fraction": 0.97,
+    "mode": "jax_ci",
+    "model": "ci-infer-gemma3-27b-bf16-1n4g",
+    "nccl": 0,
+    "nodes": 1,
+    "nvte_fused_attn": 1,
+    "overwrite": 1,
+    "partition": "gb200nvl4",
+    "pgle": 0,
+    "profile_mode": "none",
+    "run": "maxText",
+    "runDir": "maxtext_jax_ci",
+    "runtime_dependency_overrides": [
+      "typeguard==2.13.3"
+    ],
+    "script": "slurm_run.sub",
+    "segment": 1,
+    "steps": 1,
+    "time": 90,
+    "tpn": 4,
+    "va_remapping": 0,
+    "validation": "unqualified",
+    "workload_aliases": [],
+    "workload_type": "Inference",
+    "xla_config": "maxtext_gpu_inference",
+    "xla_extra_flags": ""
+  },
+  "command": [
+    "srun",
+    "--jobid=2521172",
+    "--nodelist=gb200-nvl4-ts2-81"
+  ],
+  "modes": [
+    {
+      "mode": "OFF",
+      "provenance": {
+        "mode": "OFF",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer= --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS  --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=ALWAYS_UPDATE",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132025 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# model config for gemma3-27b\n\nbase_num_decoder_layers: 62\nbase_emb_dim: 5376\nbase_num_query_heads: 32\nbase_num_kv_heads: 16\nbase_mlp_dim: 21504\nhead_dim: 128\nmlp_activations: [\"gelu\",\"linear\"]\nvocab_size: 262_144\ndecoder_block: \"gemma3\"\nnormalization_layer_epsilon: 1e-6\nlogits_via_embedding: true\nsliding_window_size: 1024\nuse_post_attn_norm: true\nuse_post_ffw_norm: true\nlocal_rope_max_timescale: 10_000\nrope_max_timescale: 1_000_000\nrope_linear_scaling_factor: 8.0\n\n# Multimodal flags (need to set use_multimodal=true)\nvision_encoder_block: \"gemma3\"\nimage_size_for_vit: 896\nnum_channels_for_vit: 3\npatch_size_for_vit: 14\nconv_stride_for_vit: 14\nhidden_size_for_vit: 1152\nintermediate_size_for_vit: 4304\nnum_hidden_layers_for_vit: 27\nnum_attention_heads_for_vit: 16\nimage_placeholder: <start_of_image>\n",
+        "model_name": "gemma3-27b",
+        "framework_source_patches": []
+      },
+      "hardware": {
+        "gpu_info": "NVIDIA GB200, GPU-93bcfae7-94bb-502d-d3b9-71b0858efff9, 189471 MiB, 595.84.01\nNVIDIA GB200, GPU-49242cab-42bf-ac85-c4f6-f64ff91c471b, 189471 MiB, 595.84.01\nNVIDIA GB200, GPU-c3c9755d-817b-44b4-6c7d-2b640c9a6315, 189471 MiB, 595.84.01\nNVIDIA GB200, GPU-061176de-8e40-86ea-b8d1-9e5dfb6cebc3, 189471 MiB, 595.84.01\n",
+        "nvlink_topology": "\t\u001b[4mGPU0\tGPU1\tGPU2\tGPU3\tNIC0\tNIC1\tNIC2\tNIC3\tNIC4\tNIC5\tNIC6\tNIC7\tNIC8\tNIC9\tNIC10\tNIC11\tNIC12\tNIC13\tNIC14\tNIC15\tNIC16\tNIC17\tDD0\tDD1\tDD2\tDD3\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tNV6\tNV6\tNV6\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\t0-71\t0\t\tN/A\nGPU1\tNV6\t X \tNV6\tNV6\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\t0-71\t0\t\tN/A\nGPU2\tNV6\tNV6\t X \tNV6\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\tPXB\t72-143\t1\t\tN/A\nGPU3\tNV6\tNV6\tNV6\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tPXB\tNODE\t72-143\t1\t\tN/A\nNIC0\tNODE\tNODE\tSYS\tSYS\t X \tPIX\tPIX\tPIX\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC1\tNODE\tNODE\tSYS\tSYS\tPIX\t X \tPIX\tPIX\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC2\tNODE\tNODE\tSYS\tSYS\tPIX\tPIX\t X \tPIX\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC3\tNODE\tNODE\tSYS\tSYS\tPIX\tPIX\tPIX\t X \tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC4\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\t X \tPIX\tPIX\tPIX\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC5\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\t X \tPIX\tPIX\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC6\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\tPIX\t X \tPIX\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC7\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\tPIX\tPIX\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\t\t\t\t\nNIC8\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tPIX\tPIX\tPIX\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC9\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPIX\t X \tPIX\tPIX\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC10\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPIX\tPIX\t X \tPIX\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC11\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPIX\tPIX\tPIX\t X \tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC12\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\t X \tPIX\tPIX\tPIX\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC13\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\t X \tPIX\tPIX\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC14\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\tPIX\t X \tPIX\tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC15\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tPIX\tPIX\tPIX\t X \tNODE\tNODE\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC16\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\t X \tPIX\tSYS\tSYS\tNODE\tNODE\t\t\t\t\nNIC17\tSYS\tSYS\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tPIX\t X \tSYS\tSYS\tNODE\tNODE\t\t\t\t\nDD0\tNODE\tPXB\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tSYS\tSYS\t\t\t\t\nDD1\tPXB\tNODE\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tSYS\tSYS\t\t\t\t\nDD2\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\t X \tNODE\t\t\t\t\nDD3\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tNODE\tSYS\tSYS\tNODE\t X \t\t\t\t\n\nLegend:\n\n  X    = Self\n  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)\n  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node\n  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)\n  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)\n  PIX  = Connection traversing at most a single PCIe bridge\n  NV#  = Connection traversing a bonded set of # NVLinks\n\nNIC Legend:\n\n  NIC0: mlx5_0\n  NIC1: mlx5_1\n  NIC2: mlx5_2\n  NIC3: mlx5_3\n  NIC4: mlx5_4\n  NIC5: mlx5_5\n  NIC6: mlx5_6\n  NIC7: mlx5_7\n  NIC8: mlx5_8\n  NIC9: mlx5_9\n  NIC10: mlx5_10\n  NIC11: mlx5_11\n  NIC12: mlx5_12\n  NIC13: mlx5_13\n  NIC14: mlx5_14\n  NIC15: mlx5_15\n  NIC16: mlx5_16\n  NIC17: mlx5_17\n  DD0: mlx5_0 data-direct function\n  DD0: mlx5_1 data-direct function\n  DD0: mlx5_2 data-direct function\n  DD0: mlx5_3 data-direct function\n  DD1: mlx5_4 data-direct function\n  DD1: mlx5_5 data-direct function\n  DD1: mlx5_6 data-direct function\n  DD1: mlx5_7 data-direct function\n  DD2: mlx5_8 data-direct function\n  DD2: mlx5_9 data-direct function\n  DD2: mlx5_10 data-direct function\n  DD2: mlx5_11 data-direct function\n  DD3: mlx5_12 data-direct function\n  DD3: mlx5_13 data-direct function\n  DD3: mlx5_14 data-direct function\n  DD3: mlx5_15 data-direct function\n\n",
+        "architecture": "aarch64\n"
+      },
+      "shape": {},
+      "source_directory": "suite/parallel-models-20261014/gemma3-27b/results/gemma3-27b/modes/OFF"
+    }
+  ],
+  "measurement": "All steps 101\u2013300 after 100 warmups; per-step slowest synchronized rank; CV <=10% and half-window mean drift <=5% globally and for every rank"
+}

@@ -1,0 +1,338 @@
+{
+  "campaign": "command-buffers",
+  "workload": "gemma2-2b",
+  "phase": "inference",
+  "hardware": {
+    "node": "gb-nvl-053-compute09",
+    "gpu_type": "GB200"
+  },
+  "nodes": 1,
+  "gpus": 4,
+  "architecture": "aarch64",
+  "global_batch": 256,
+  "outcome": "COMPLETED",
+  "allocation_or_job": "2507927",
+  "image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+  "settings": {
+    "CMDBUFFERDUMP": 0,
+    "Driver": 0,
+    "Exclusive": 0,
+    "GDB": 0,
+    "LHS": 1,
+    "NcclDebug": 0,
+    "NcclGraphMix": 1,
+    "NcclLink": 0,
+    "PROFILE": "none",
+    "Sanitizer": 0,
+    "ScaleLaunchQueue": "1x",
+    "XLADUMPS": 0,
+    "_container_source": "explicit",
+    "_explicit_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "_notes": [
+      "Same dlcluster GB200 node; catalog model, batch and mesh retained.",
+      "Four modes serialized, each with 100 warmup and 200 measured steps.",
+      "Skill-owned consistent AOT runner, BF16 dot-product attention, no framework patches."
+    ],
+    "_resolved_container_image": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-12",
+    "account": "blackwell",
+    "allocator": "bfc",
+    "baseDir": "results",
+    "bindpcie": 0,
+    "cluster": "dlcluster",
+    "container": 43,
+    "cuda_device_max_connections": 0,
+    "custom_mounts": "/home/scratch.shawnw_inf/workload-runs/inference-cb-suite-20261013/skill/assets/jax-run-scripts/inference_legacy_no_tensor_transpose.yml:/opt/maxtext/src/maxtext/configs/inference/jax_workloads_legacy.yml:ro",
+    "dcn_data": 1,
+    "dcn_expert": 1,
+    "dcn_fsdp": 1,
+    "dcn_fsdp_t": 1,
+    "dcn_pipe": 1,
+    "env_vars": {
+      "EXPECTED_BATCH": "256",
+      "EXPECTED_LAYERS": "13",
+      "EXPECTED_MODEL": "gemma2-2b",
+      "PYTHONUNBUFFERED": "1",
+      "SUITE_ROOT": "/home/scratch.shawnw_inf/workload-runs/inference-cb-suite-20261013",
+      "TF_CPP_VMODULE": "",
+      "TF_FORCE_GPU_ALLOW_GROWTH": "true"
+    },
+    "fmha": 1,
+    "graph": "CGOFF",
+    "host_memory_gb": null,
+    "ici_auto": -1,
+    "ici_data": 1,
+    "ici_expert": 1,
+    "ici_fsdp": 1,
+    "ici_fsdp_t": 1,
+    "ici_pipe": 1,
+    "ici_seq": 1,
+    "ici_tensor": 1,
+    "ici_tensor_seq": 1,
+    "ici_tensor_t": 1,
+    "inference_aot_mode": "consistent",
+    "inference_aot_runner_sha256": "37c35693bb232fb71ff27944cd61b68bb3c287c9ba1cb5cde2a32144c5e15e64",
+    "jaxlib": 0,
+    "maxtext": "container",
+    "maxtext_config_path": "/opt/maxtext/src/maxtext/configs/inference/jax_workloads_legacy.yml",
+    "maxtext_runner": "inference",
+    "mem_fraction": 0.94,
+    "mode": "inference",
+    "model": "infer-gemma2-2b-bf16-1n4g",
+    "nccl": 0,
+    "nodes": 1,
+    "nvte_fused_attn": 1,
+    "overwrite": 1,
+    "partition": "gb200nvl72_preprod",
+    "pgle": 0,
+    "profile_mode": "none",
+    "run": "maxText",
+    "runDir": "maxtext_inference",
+    "runtime_dependency_overrides": [
+      "typeguard==2.13.3"
+    ],
+    "script": "slurm_run.sub",
+    "segment": 1,
+    "steps": 1,
+    "time": 60,
+    "tpn": 4,
+    "validation": "unqualified",
+    "workload_aliases": [],
+    "workload_type": "Inference",
+    "xla_config": "maxtext_gpu_inference"
+  },
+  "command": [
+    "sbatch",
+    "--parsable",
+    "--account=blackwell",
+    "--partition=gb200nvl72_preprod",
+    "--nodes=1",
+    "--nodelist=gb-nvl-053-compute09",
+    "--ntasks=4",
+    "--ntasks-per-node=4",
+    "--cpus-per-task=16",
+    "--gres=gpu:GB200:4",
+    "--exclusive",
+    "--mem=0",
+    "--time=60",
+    "--dependency=afterany:2507484",
+    "--job-name=infer-cb-gemma2-2b",
+    "--output=/home/scratch.shawnw_inf/workload-runs/inference-cb-suite-20261013/results/infer-gemma2-2b-bf16-1n4g_c262f0966cb2/slurm-%j.log",
+    "/home/scratch.shawnw_inf/workload-runs/inference-cb-suite-20261013/suite.sbatch"
+  ],
+  "modes": [
+    {
+      "mode": "OFF",
+      "provenance": {
+        "mode": "OFF",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer= --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=ALWAYS_UPDATE",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132025 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# model config for gemma-2B\n\nbase_emb_dim: 2304\nbase_num_query_heads: 8\nbase_num_kv_heads: 4\nbase_mlp_dim: 9216\nbase_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer\nhead_dim: 256\nmlp_activations: [\"gelu\",\"linear\"]\nvocab_size: 256128\ndecoder_block: \"gemma2\"\nnormalization_layer_epsilon: 1.e-06\nlogits_via_embedding: true\nfinal_logits_soft_cap: 30.0\nattn_logits_soft_cap: 50.0\nsliding_window_size: 4096\nuse_post_attn_norm: true\nuse_post_ffw_norm: true\n",
+        "model_name": "gemma2-2b",
+        "framework_source_patches": []
+      },
+      "hardware": null,
+      "shape": {
+        "global_batch": 256,
+        "decoder_layers": 13,
+        "experts": 1,
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "embedding_dim": 2304,
+        "query_heads": 8,
+        "kv_heads": 4,
+        "max_target_length": 2048,
+        "padded_prefill_tokens": 1024,
+        "true_prompt_tokens": 4
+      },
+      "source_directory": "suite/results/infer-gemma2-2b-bf16-1n4g_c262f0966cb2/modes/OFF"
+    },
+    {
+      "mode": "ALWAYS_UPDATE",
+      "provenance": {
+        "mode": "ALWAYS_UPDATE",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=ALWAYS_UPDATE",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132025 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# model config for gemma-2B\n\nbase_emb_dim: 2304\nbase_num_query_heads: 8\nbase_num_kv_heads: 4\nbase_mlp_dim: 9216\nbase_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer\nhead_dim: 256\nmlp_activations: [\"gelu\",\"linear\"]\nvocab_size: 256128\ndecoder_block: \"gemma2\"\nnormalization_layer_epsilon: 1.e-06\nlogits_via_embedding: true\nfinal_logits_soft_cap: 30.0\nattn_logits_soft_cap: 50.0\nsliding_window_size: 4096\nuse_post_attn_norm: true\nuse_post_ffw_norm: true\n",
+        "model_name": "gemma2-2b",
+        "framework_source_patches": []
+      },
+      "hardware": null,
+      "shape": {
+        "global_batch": 256,
+        "decoder_layers": 13,
+        "experts": 1,
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "embedding_dim": 2304,
+        "query_heads": 8,
+        "kv_heads": 4,
+        "max_target_length": 2048,
+        "padded_prefill_tokens": 1024,
+        "true_prompt_tokens": 4
+      },
+      "source_directory": "suite/results/infer-gemma2-2b-bf16-1n4g_c262f0966cb2/modes/ALWAYS_UPDATE"
+    },
+    {
+      "mode": "SKIP_TEMP",
+      "provenance": {
+        "mode": "SKIP_TEMP",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=SKIP_TEMP",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132025 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# model config for gemma-2B\n\nbase_emb_dim: 2304\nbase_num_query_heads: 8\nbase_num_kv_heads: 4\nbase_mlp_dim: 9216\nbase_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer\nhead_dim: 256\nmlp_activations: [\"gelu\",\"linear\"]\nvocab_size: 256128\ndecoder_block: \"gemma2\"\nnormalization_layer_epsilon: 1.e-06\nlogits_via_embedding: true\nfinal_logits_soft_cap: 30.0\nattn_logits_soft_cap: 50.0\nsliding_window_size: 4096\nuse_post_attn_norm: true\nuse_post_ffw_norm: true\n",
+        "model_name": "gemma2-2b",
+        "framework_source_patches": []
+      },
+      "hardware": null,
+      "shape": {
+        "global_batch": 256,
+        "decoder_layers": 13,
+        "experts": 1,
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "embedding_dim": 2304,
+        "query_heads": 8,
+        "kv_heads": 4,
+        "max_target_length": 2048,
+        "padded_prefill_tokens": 1024,
+        "true_prompt_tokens": 4
+      },
+      "source_directory": "suite/results/infer-gemma2-2b-bf16-1n4g_c262f0966cb2/modes/SKIP_TEMP"
+    },
+    {
+      "mode": "SKIP_PROFILED",
+      "provenance": {
+        "mode": "SKIP_PROFILED",
+        "supported_update_modes": [
+          "ALWAYS_UPDATE",
+          "SKIP_TEMP",
+          "SKIP_PROFILED"
+        ],
+        "command_buffer_commands": [
+          "FUSION",
+          "CUBLAS",
+          "CUDNN",
+          "COLLECTIVES",
+          "CUSTOM_CALL",
+          "CUBLASLT",
+          "DYNAMIC_SLICE_FUSION",
+          "CONVOLUTION",
+          "HOST_EXECUTE",
+          "COLLECTIVES_KERNEL"
+        ],
+        "excluded_commands": [
+          "WHILE",
+          "CONDITIONAL"
+        ],
+        "base_xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUDNN,COLLECTIVES,CUSTOM_CALL,CUBLASLT,DYNAMIC_SLICE_FUSION,CONVOLUTION,HOST_EXECUTE,COLLECTIVES_KERNEL --xla_gpu_command_buffer_unroll_loops=false --xla_gpu_enable_cudnn_fmha=1 --xla_gpu_require_exclusive_lock=0 --xla_gpu_enable_latency_hiding_scheduler=1 --xla_gpu_command_buffer_scheduling_mode=LHS --xla_disable_hlo_passes=rematerialization --xla_gpu_command_buffer_update_mode=SKIP_PROFILED",
+        "revisions": {
+          "xla": "5cba10fbbb68e6d549d7670aa2d4d7b487494c86",
+          "maxtext": "b51e17d5dde9590909537673864cde99481f6f2e",
+          "jax": "290228f95c2435d1cc110469e785b83e9859760a"
+        },
+        "versions": {
+          "jax": "0.12.0.dev20261012+290228f95c",
+          "jaxlib": "0.12.0.dev20261013",
+          "typeguard": "2.13.3"
+        },
+        "model_config": "# Copyright 2023\u20132025 Google LLC\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    https://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n\n# model config for gemma-2B\n\nbase_emb_dim: 2304\nbase_num_query_heads: 8\nbase_num_kv_heads: 4\nbase_mlp_dim: 9216\nbase_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer\nhead_dim: 256\nmlp_activations: [\"gelu\",\"linear\"]\nvocab_size: 256128\ndecoder_block: \"gemma2\"\nnormalization_layer_epsilon: 1.e-06\nlogits_via_embedding: true\nfinal_logits_soft_cap: 30.0\nattn_logits_soft_cap: 50.0\nsliding_window_size: 4096\nuse_post_attn_norm: true\nuse_post_ffw_norm: true\n",
+        "model_name": "gemma2-2b",
+        "framework_source_patches": []
+      },
+      "hardware": null,
+      "shape": {
+        "global_batch": 256,
+        "decoder_layers": 13,
+        "experts": 1,
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "embedding_dim": 2304,
+        "query_heads": 8,
+        "kv_heads": 4,
+        "max_target_length": 2048,
+        "padded_prefill_tokens": 1024,
+        "true_prompt_tokens": 4
+      },
+      "source_directory": "suite/results/infer-gemma2-2b-bf16-1n4g_c262f0966cb2/modes/SKIP_PROFILED"
+    }
+  ],
+  "measurement": "All steps 101\u2013300 after 100 warmups; per-step slowest synchronized rank; CV <=10% and half-window mean drift <=5% globally and for every rank"
+}

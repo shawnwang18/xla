@@ -1,0 +1,39 @@
+{
+  "recorded_at": "2026-10-14T07:44:06.534890+00:00",
+  "environment_records": 40,
+  "campaigns": [
+    "pr50278",
+    "pr50281",
+    "pr50286",
+    "command-buffers",
+    "bug6811592"
+  ],
+  "archives": [
+    {
+      "path": "bug6811592-reproduction.tar.gz",
+      "bytes": 307222,
+      "sha256": "9406b559b3c827f73ea62e7420ea2874c4d72fe93ddc59a62787ba0ebef1c041"
+    },
+    {
+      "path": "command-buffers-reproduction.tar.gz",
+      "bytes": 738106,
+      "sha256": "603213042157d9f1442f433c346bf9a98cd051f48db7bf7f9e5c025799dd1df6"
+    },
+    {
+      "path": "pr50278-reproduction.tar.gz",
+      "bytes": 506840,
+      "sha256": "e37754255c2eaca988f1050f4bdc4fc36bb71827912c87810d2f2f28a370ea37"
+    },
+    {
+      "path": "pr50281-reproduction.tar.gz",
+      "bytes": 1023001,
+      "sha256": "09bc00edd0d74a432b895cadc8b64d3b3c7786ce73c84e170e8a42a8e012b00f"
+    },
+    {
+      "path": "pr50286-reproduction.tar.gz",
+      "bytes": 160035,
+      "sha256": "2932cac8d8f9e3cc172565dbadf191ff6294c258115bb437401f8b2574ec2541"
+    }
+  ],
+  "limits": "Reproduction archive recorded on 2026-10-14.\n\nContents: frozen harness/runner code, resolved per-trial settings, mode flags,\nper-workload environment records, available runtime argv, hardware/driver observations,\nbuild/library hashes, software revisions, results and measurement protocols.\nHistorical failed and superseded attempts may be present; results-summary.json and\nthe environment index identify the exact final trials used for the comparison.\n\nReproduction procedure:\n1. Use environments/<workload>.json to select the campaign and exact final variant.\n2. Obtain the recorded internal container image; registry access is required.\n   A dated image tag is not an immutable digest. Use a recorded digest where available;\n   otherwise check the saved source revisions/library hashes before accepting a rerun.\n3. For PR experiments, restore/rebuild the recorded PR XLA/JAX binaries and verify\n   the build-manifest hashes. These binaries override the container's bundled jaxlib;\n   using the base image alone does not reproduce a PR experiment.\n4. Stage the frozen harness and configs on shared storage. Preserve the /work,\n   /result and /opt/pr-jaxlibs container mount contracts in rank.sh and launch.json.\n   Adapt original absolute paths, node constraints and Slurm IDs to your new setup.\n5. Reuse or acquire matching GPU resources. All dlcluster node access goes through\n   the dlcluster head node. Launch compute as scheduler steps, never on the login node.\n6. Run one configuration at a time on the same node/GPU set for a workload. Preserve\n   batch, precision, parallelism, allocator policy, flag order, warmups and sample window.\n7. Use the archived collectors and protocol to evaluate full windows and failed runs.\n   A successful process exit alone does not establish stable timing or model accuracy.\n\nScope: this saves configurations and code, not a bootable container or binary backup.\nLarge wheels, CUDA libraries, full HLO dumps, Nsight captures and model checkpoints are\nnot included. Available hashes and original artifact paths identify those dependencies.\nInference uses random weights. Historical commands are evidence, not an automatically\nvalidated portable launcher. This documentation/archive task did not launch new GPU tests.\nNo credentials or authentication files are included.\n"
+}
