@@ -1,0 +1,25 @@
+{
+  "all_modes_valid_and_stable": false,
+  "checks": [
+    {
+      "mode": "OFF",
+      "valid_gc_control": true,
+      "errors": []
+    },
+    {
+      "mode": "ALWAYS_UPDATE",
+      "valid_gc_control": true,
+      "errors": []
+    },
+    {
+      "mode": "SKIP_TEMP",
+      "valid_gc_control": true,
+      "errors": []
+    },
+    {
+      "mode": "SKIP_PROFILED",
+      "valid_gc_control": true,
+      "errors": []
+    }
+  ]
+}
