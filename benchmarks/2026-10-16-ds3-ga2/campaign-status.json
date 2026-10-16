@@ -1,0 +1,108 @@
+{
+  "state": "COMPLETED",
+  "allocation_id": "2568930",
+  "pid": 878965,
+  "runs": [
+    {
+      "index": 1,
+      "variant": "base",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/01-base",
+      "returncode": 0,
+      "wall_seconds": 503.6515539586544,
+      "step_id": "2568930.29",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 2,
+      "variant": "pr50182",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/02-pr50182",
+      "returncode": 0,
+      "wall_seconds": 516.8485676087439,
+      "step_id": "2568930.30",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 3,
+      "variant": "pr50278",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/03-pr50278",
+      "returncode": 0,
+      "wall_seconds": 520.6035000421107,
+      "step_id": "2568930.31",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 4,
+      "variant": "pr50281",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/04-pr50281",
+      "returncode": 0,
+      "wall_seconds": 521.6658935826272,
+      "step_id": "2568930.32",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 5,
+      "variant": "pr50286",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/05-pr50286",
+      "returncode": 0,
+      "wall_seconds": 513.4383122175932,
+      "step_id": "2568930.33",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 6,
+      "variant": "pr50286",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/06-pr50286",
+      "returncode": 0,
+      "wall_seconds": 525.6634834557772,
+      "step_id": "2568930.34",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 7,
+      "variant": "pr50281",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/07-pr50281",
+      "returncode": 0,
+      "wall_seconds": 505.02473809942603,
+      "step_id": "2568930.35",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 8,
+      "variant": "pr50278",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/08-pr50278",
+      "returncode": 0,
+      "wall_seconds": 513.8297034315765,
+      "step_id": "2568930.36",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 9,
+      "variant": "pr50182",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/09-pr50182",
+      "returncode": 0,
+      "wall_seconds": 512.7018031664193,
+      "step_id": "2568930.37",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    },
+    {
+      "index": 10,
+      "variant": "base",
+      "state": "COMPLETED",
+      "output": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/results/10-base",
+      "returncode": 0,
+      "wall_seconds": 505.3990417215973,
+      "step_id": "2568930.38",
+      "nodes": "gb-nvl-053-compute[01-02,04-09]"
+    }
+  ],
+  "updated_at": "2026-10-16T07:00:30.382571+00:00"
+}

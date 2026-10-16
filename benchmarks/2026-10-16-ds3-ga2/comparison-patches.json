@@ -1,0 +1,26 @@
+{
+  "comparison-pr50182.patch": {
+    "sha256": "ae856e421c03fb9ffdb94a823a4aa2f7556d6c29602d3c0761d851adab7f5920",
+    "base": "ab7771db404bbc19b519951e0099ee0939c28968",
+    "result_commit": "5e6ae0630a537793e4868aa80f468e58f187448f",
+    "result_tree": "4b7cd7440e677a494bc60bfc86595efe03a754d0"
+  },
+  "comparison-pr50278.patch": {
+    "sha256": "4e3b25106156b489981af35241b435ad996ebc35e7b0acbba3c7fbdd974a4150",
+    "base": "ab7771db404bbc19b519951e0099ee0939c28968",
+    "result_commit": "1e885bb0485ef1e44977875b5ce8acf5513dd53d",
+    "result_tree": "e7a730e8219b1dea836a8251148fcacdbf495e03"
+  },
+  "comparison-pr50281.patch": {
+    "sha256": "0b6c5d7535b93974fc6c5bda29020edd6ba1c8a3ff38ed934d664cc44d589fb7",
+    "base": "ab7771db404bbc19b519951e0099ee0939c28968",
+    "result_commit": "feb2d409c9b6f61baf2f3a69821f470127db1c84",
+    "result_tree": "3d6ae0abd2bb287b8b76793bda60b4ecedb9b32f"
+  },
+  "comparison-pr50286.patch": {
+    "sha256": "27e8a9ed147076760b0c6b3f9874f76a4a6a2389c1c35047ae96bf34d4b83ba1",
+    "base": "ab7771db404bbc19b519951e0099ee0939c28968",
+    "result_commit": "5712546e4643a684c9705c66b5eef8289b78ff2e",
+    "result_tree": "8f8e9144a534abfc2cbee35599c835a6c6f14829"
+  }
+}

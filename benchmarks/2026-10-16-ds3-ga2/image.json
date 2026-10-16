@@ -1,0 +1,7 @@
+{
+  "tag": "gitlab-master.nvidia.com:5005/dl/dgx/jax:maxtext-2026-10-15",
+  "manifest_digest": "sha256:64ba4a42e232482933ef69926bb0f86643b9eea70be54f6ce4409eaac79a7729",
+  "arm64_digest": "sha256:d2661dcea6ad424590e81480d77bc8281b2cffbcc67cf9e6a0cb93e6da876e19",
+  "image": "gitlab-master.nvidia.com:5005/dl/dgx/jax@sha256:d2661dcea6ad424590e81480d77bc8281b2cffbcc67cf9e6a0cb93e6da876e19",
+  "source": "latest-published resolved once on 2026-10-16"
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "trial": "01-base",
+    "raw_records": 32,
+    "e2e_ms": 4934.296522190476,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "02-pr50182",
+    "raw_records": 32,
+    "e2e_ms": 4930.878719857143,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "03-pr50278",
+    "raw_records": 32,
+    "e2e_ms": 4913.6939964761905,
+    "peak_jax_gib": 133.46900153160095,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "04-pr50281",
+    "raw_records": 32,
+    "e2e_ms": 4912.268660571429,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "05-pr50286",
+    "raw_records": 32,
+    "e2e_ms": 4916.324148095238,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "06-pr50286",
+    "raw_records": 32,
+    "e2e_ms": 4898.508298904762,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "07-pr50281",
+    "raw_records": 32,
+    "e2e_ms": 4910.278040380953,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "08-pr50278",
+    "raw_records": 32,
+    "e2e_ms": 4913.046924095238,
+    "peak_jax_gib": 133.46900153160095,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "09-pr50182",
+    "raw_records": 32,
+    "e2e_ms": 4896.322723238095,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  },
+  {
+    "trial": "10-base",
+    "raw_records": 32,
+    "e2e_ms": 4907.240273333334,
+    "peak_jax_gib": 136.3256552219391,
+    "sampled_physical_peak_gib": 175.2451171875,
+    "source_and_config_verified": true,
+    "validated": true
+  }
+]

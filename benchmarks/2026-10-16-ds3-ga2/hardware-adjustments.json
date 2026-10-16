@@ -1,0 +1,132 @@
+{
+  "reason": "Initial 32-rank JAX preflight rejected differing GPU topology fingerprints. Inventory shows GB200 and driver580.159.04 throughout, with two reported memory capacities.",
+  "common_environment": {
+    "XLA_PJRT_GPU_VALIDATE_TOPOLOGY": "false",
+    "NCCL_CFT_ENABLE": "0",
+    "LD_LIBRARY_PATH": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/lib/aarch64-linux-gnu",
+    "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.80"
+  },
+  "nodes": {
+    "gb-nvl-053-compute01": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 192527,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute02": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 189471,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute04": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 192527,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute05": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 189471,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute06": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 189471,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute07": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 189471,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute08": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 192527,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    },
+    "gb-nvl-053-compute09": {
+      "gpu_count": 4,
+      "gpu_model": "NVIDIA GB200",
+      "driver": "580.159.04",
+      "memory_mib_per_gpu": 192527,
+      "max_sm_clock_mhz": 1965,
+      "observed_sm_clock_mhz": 1200,
+      "max_memory_clock_mhz": 4000
+    }
+  },
+  "validation": "Rerun real 32-GPU reduction and require successful full-rank training; same node placement and setting for every variant.",
+  "imex": {
+    "assigned_channel": 926,
+    "assignment_verified_step": "2568930.16",
+    "host_inventory": "All 8 nodes expose user-owned channel926 with rw permissions.",
+    "container_environment": "--container-env=NVIDIA_IMEX_CHANNELS; host value926",
+    "container_mounts": [
+      "private empty directory over /dev/nvidia-caps-imex-channels",
+      "bind only assigned host channel926 into the container"
+    ],
+    "checked_before_jax": true
+  },
+  "cft": {
+    "reason": "Preflight2568930.18 fails in NCCL2.32.4 ncclGpuGetCliqueIds with CUDA801 operation not supported. Container library supports NCCL_CFT_ENABLE; disable new CFT endpoints identically for all variants without disabling MNNVL or NVLS.",
+    "reference": "https://github.com/NVIDIA/nccl/blob/v2.32.3-1/src/cft_dev_runtime.cc",
+    "library_inspection_step": "2568930.19",
+    "validation": "CFT_ENABLE=0 alone failed in step2568930.20. Combined with native host driver library, collective succeeded in2568930.22."
+  },
+  "cuda_driver_library": {
+    "inspection_step": "2568930.21",
+    "image_default": "/usr/local/cuda-13.5/compat/lib.real/libcuda.so.620.65",
+    "image_default_api_version": 13050,
+    "native_host_library": "/usr/lib/aarch64-linux-gnu/libcuda.so.580.159.04",
+    "test_library_path": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/lib/aarch64-linux-gnu",
+    "validation": "Preflight2568930.22 COMPLETED0:0: all32ranks/8hosts report reduction32; NCCL recognizes MNNVL32GPU domain and enables NVLS."
+  },
+  "distributed_autotuning": {
+    "failed_step": "2568930.23",
+    "error": "No configuration found in cache after synchronizing results across all shards. All ranks on lower-capacity nodes failed during TE bootstrap before any training step.",
+    "common_flag": "--xla_gpu_shard_autotuning=false",
+    "effect": "Tune on each rank rather than distributing autotuning work across ranks with differing device fingerprints.",
+    "source": "xla/service/gpu/autotuning/config_assigner_pass.cc RunImpl",
+    "validation": "Preflight2568930.24 passed; training2568930.25 compiled and reached NCCL all-to-all without shared-cache error."
+  },
+  "allocator": {
+    "failed_step": "2568930.25",
+    "error": "NCCL all-to-all CUDA out of memory before first training sample; JAX in-use peak147955037184 bytes, reserved174151696384 bytes on rank4.",
+    "original_memory_fraction": 0.88,
+    "common_memory_fraction": 0.8,
+    "model_changed": false,
+    "validation": "Baseline2568930.29 completed all65steps on32ranks, passed PGLE and measurement checks. PeakJAX in-use136.325655GiB, peakpool149.828125GiB, sampleddevicepeak175.245117GiB."
+  },
+  "pgle_profile_sync": {
+    "failed_step": "2568930.27",
+    "evidence": "diagnostics/pgle-rank4-stack.txt: blocked in _share_fdo_profiles at compiler.py:706; lower-capacity ranks wait while higher-capacity ranks compile.",
+    "common_patch": "jax-pgle-profile-key.patch",
+    "effect": "Only PGLE profile synchronization uses device-kind hashing; executable cache keys retain complete topology.",
+    "validation": "Expanded preflight2568930.28 passed; baseline2568930.29 completed65steps on32ranks with both initial andPGLE compiler passes verified."
+  }
+}

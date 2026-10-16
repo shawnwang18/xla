@@ -1,0 +1,28 @@
+{
+  "source_commit": "e0ec3646e180c64be20a63b1b2d50054f8c8995e",
+  "scope": "Common Python-only PGLE profile synchronization fix; executable cache keys retain full topology.",
+  "files": {
+    "jax/_src/cache_key.py": {
+      "original_sha256": "06026707a10f6fd707b3198ad47041867621c5dd39bf28bc7a71eee6baa50efe",
+      "patched_sha256": "e6d29bdebac9ae593072948c3d4745a15188388a1733bfc9be0a81f680ab29c3"
+    },
+    "jax/_src/compilation_cache.py": {
+      "original_sha256": "19801f484ae07353885604ceebba72e545c65606ab6ba9beb925b070ac95d62e",
+      "patched_sha256": "8fd6aee372c64f998be9aafb079aebd0e206893631309afd098583027e538b3c"
+    },
+    "jax/_src/compiler.py": {
+      "original_sha256": "2fd500e123543f69cd21540a87cd0a34c014ff9dd7a6cec71b2467235d2cef25",
+      "patched_sha256": "801df527f42b7cc200263237834890c93023560b1f4a58255f85a38f83997040"
+    }
+  },
+  "validation": {
+    "step": "2568930.28",
+    "state": "COMPLETED",
+    "exit_code": "0:0",
+    "ranks": 32,
+    "reduction_calls_per_rank": 6,
+    "shared_profile_key_count": 1,
+    "executable_key_count": 2,
+    "automatic_pgle_profiles_verified": true
+  }
+}

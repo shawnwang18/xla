@@ -1,0 +1,1983 @@
+diff --git a/xla/backends/gpu/autotuner/BUILD b/xla/backends/gpu/autotuner/BUILD
+index 6f74a53ae4..a875697967 100644
+--- a/xla/backends/gpu/autotuner/BUILD
++++ b/xla/backends/gpu/autotuner/BUILD
+@@ -1236,3 +1236,51 @@ xla_test(
+         ":factory_rocm",
+     ]),
+ )
++
++cc_library(
++    name = "fusion_recomputation",
++    srcs = ["fusion_recomputation.cc"],
++    hdrs = ["fusion_recomputation.h"],
++    deps = [
++        ":gpu_codegen_backend",
++        ":gpu_profiler",
++        "//xla:xla_proto_cc",
++        "//xla/backends/autotuner:profiler",
++        "//xla/backends/gpu/transforms:recompute_fusion_side_outputs",
++        "//xla/hlo/ir:hlo",
++        "//xla/service:buffer_assignment",
++        "//xla/service:compiler",
++        "//xla/service:decision",
++        "//xla/service:dump",
++        "//xla/service:executable",
++        "//xla/service:gpu_topology",
++        "//xla/service/gpu:gpu_executable",
++        "//xla/service/gpu/model:gpu_recomputation_cost_model",
++        "//xla/stream_executor:device_address_allocator",
++        "//xla/stream_executor:stream_executor_h",
++        "@com_google_absl//absl/container:flat_hash_map",
++        "@com_google_absl//absl/log",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:status_macros",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/strings",
++        "@com_google_absl//absl/strings:str_format",
++        "@com_google_absl//absl/time",
++    ],
++)
++
++xla_test(
++    name = "fusion_recomputation_test",
++    srcs = ["fusion_recomputation_test.cc"],
++    backends = ["gpu"],
++    deps = [
++        ":fusion_recomputation",
++        "//xla/backends/gpu/tests:hlo_pjrt_gpu_test_base",
++        "//xla/backends/gpu/transforms:recompute_fusion_side_outputs",
++        "//xla/hlo/ir:hlo",
++        "//xla/stream_executor:platform",
++        "//xla/stream_executor:platform_manager",
++        "@com_google_absl//absl/status:status_matchers",
++        "@com_google_googletest//:gtest_main",
++    ],
++)
+diff --git a/xla/backends/gpu/autotuner/fusion_recomputation.cc b/xla/backends/gpu/autotuner/fusion_recomputation.cc
+new file mode 100644
+index 0000000000..0d349f77dd
+--- /dev/null
++++ b/xla/backends/gpu/autotuner/fusion_recomputation.cc
+@@ -0,0 +1,195 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/backends/gpu/autotuner/fusion_recomputation.h"
++
++#include <array>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "absl/container/flat_hash_map.h"
++#include "absl/log/log.h"
++#include "absl/status/status.h"
++#include "absl/status/status_macros.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/str_cat.h"
++#include "absl/strings/str_format.h"
++#include "absl/time/time.h"
++#include "xla/backends/autotuner/profiler.h"
++#include "xla/backends/gpu/autotuner/gpu_codegen_backend.h"
++#include "xla/backends/gpu/autotuner/gpu_profiler.h"
++#include "xla/hlo/ir/hlo_module.h"
++#include "xla/hlo/ir/hlo_print_options.h"
++#include "xla/service/buffer_assignment.h"
++#include "xla/service/decision.h"
++#include "xla/service/dump.h"
++#include "xla/service/executable.h"
++#include "xla/service/gpu/gpu_executable.h"
++#include "xla/service/gpu/model/gpu_recomputation_cost_model.h"
++#include "xla/service/gpu_topology.h"
++#include "xla/xla.pb.h"
++
++namespace xla::gpu {
++namespace {
++
++absl::StatusOr<Decision> Evaluate(const FusionRecomputeVariants& variants,
++                                  Compiler* compiler,
++                                  const Compiler::GpuTargetConfig& target,
++                                  se::StreamExecutor* executor,
++                                  se::DeviceAddressAllocator* allocator) {
++  if (executor == nullptr)
++    return Decision::Forbid("requires a profiling device");
++  auto compile = [&](const HloModule& source) {
++    auto module = source.Clone();
++    auto& debug = module->mutable_config().mutable_debug_options();
++    GpuCodegenBackend::AdjustDebugOptionsForAutotuning(debug);
++    debug.set_xla_gpu_experimental_fusion_recomputation(0);
++    Compiler::CompileOptions options;
++    options.device_allocator = allocator;
++    options.gpu_topology = GetSingleDeviceGpuTopology("", target);
++    // These modules already have the final fusion boundaries. Do NOT run the
++    // fusion pipeline again or measure a fused-vs-unfused surrogate.
++    return compiler->RunBackend(std::move(module), executor, options);
++  };
++  ABSL_ASSIGN_OR_RETURN(auto before, compile(*variants.before));
++  ABSL_ASSIGN_OR_RETURN(auto after, compile(*variants.after));
++  auto temp_bytes = [](Executable* executable) -> absl::StatusOr<int64_t> {
++    const auto* gpu = dynamic_cast<GpuExecutable*>(executable);
++    if (!gpu) return absl::InternalError("expected a GPU executable");
++    int64_t bytes = 0;
++    for (const BufferAllocation& allocation : gpu->allocations()) {
++      if (allocation.IsPreallocatedTempBuffer()) bytes += allocation.size();
++    }
++    return bytes;
++  };
++  ABSL_ASSIGN_OR_RETURN(int64_t before_temp, temp_bytes(before.get()));
++  ABSL_ASSIGN_OR_RETURN(int64_t after_temp, temp_bytes(after.get()));
++  if (after_temp > before_temp) {
++    return Decision::Forbid("compiled region temporary allocation increases");
++  }
++  auto profiler = GpuProfiler::Create(
++      executor, {/*redzone_padding_bytes=*/256, /*should_init_buffers=*/true},
++      allocator);
++  if (!profiler) return absl::InternalError("could not create GPU profiler");
++  ABSL_ASSIGN_OR_RETURN(auto inputs,
++                        profiler->CreateInputBuffers(before.get()));
++  // Verify all externally observable region outputs, not just the gradient.
++  {
++    ABSL_ASSIGN_OR_RETURN(auto reference,
++                          profiler->Profile(before.get(), *inputs));
++    ABSL_ASSIGN_OR_RETURN(auto output, profiler->Profile(after.get(), *inputs));
++    if (!reference.output_buffer || !output.output_buffer) {
++      return absl::InternalError("missing profiling output");
++    }
++    ABSL_RETURN_IF_ERROR(profiler->CheckOutputBuffer(
++        *output.output_buffer, *reference.output_buffer, /*rtol=*/1e-5));
++    ABSL_RETURN_IF_ERROR(profiler->CheckInputBuffers(*inputs));
++  }
++  std::vector<RecomputationSample> samples;
++  std::string samples_csv =
++      "block,before_first_ns,after_first_ns,after_second_ns,before_second_ns\n";
++  for (int block = 0; block < 25; ++block) {
++    std::array<double, 4> ns;
++    for (int i = 0; i < 4; ++i) {
++      ABSL_ASSIGN_OR_RETURN(
++          auto profile,
++          profiler->Profile((i == 0 || i == 3) ? before.get() : after.get(),
++                            *inputs));
++      ns[i] = absl::ToDoubleNanoseconds(profile.duration);
++    }
++    samples.push_back({ns[0], ns[1], ns[2], ns[3]});
++    absl::StrAppendFormat(&samples_csv, "%d,%.0f,%.0f,%.0f,%.0f\n", block,
++                          ns[0], ns[1], ns[2], ns[3]);
++  }
++  ABSL_RETURN_IF_ERROR(profiler->CheckInputBuffers(*inputs));
++  const auto measurement = EvaluateRecomputationMeasurements(samples);
++  std::string report;
++  absl::StrAppendFormat(
++      &report,
++      "eliminated_bytes=%d\nmeasured_before_ns=%.0f\nmeasured_after_ns=%.0f\n"
++      "gain_ns=%.0f\nuncertainty_ns=%.0f\nrequired_gain_ns=%.0f\naccepted=%d\n",
++      variants.eliminated_bytes, measurement.before_ns, measurement.after_ns,
++      measurement.gain_ns, measurement.uncertainty_ns,
++      measurement.required_gain_ns, measurement.decision.IsAllowed());
++  absl::StrAppendFormat(
++      &report, "compiled_before_temp_bytes=%d\ncompiled_after_temp_bytes=%d\n",
++      before_temp, after_temp);
++  // The analytical model is diagnostic until its errors have been calibrated
++  // on held-out kernels/devices. It includes dtype/op profiles, coalescing,
++  // indexing multiplicity and compute-memory overlap from the existing model;
++  // timings above additionally observe codegen, registers, spills and caches.
++  for (auto [label, module] : {std::pair{"before", variants.before.get()},
++                               std::pair{"after", variants.after.get()}}) {
++    auto estimate =
++        EstimateRecomputationRegion(*module, target.device_description);
++    if (estimate.ok()) {
++      absl::StrAppendFormat(
++          &report,
++          "uncalibrated_%s: total_ns=%.0f compute_ns=%.0f read_ns=%.0f "
++          "write_ns=%.0f bytes_read=%d bytes_written=%d kernels=%d\n",
++          label, estimate->duration_ns, estimate->compute_ns, estimate->read_ns,
++          estimate->write_ns, estimate->bytes_read, estimate->bytes_written,
++          estimate->kernels);
++    } else {
++      absl::StrAppend(&report, "uncalibrated_", label, ": ",
++                      estimate.status().ToString(), "\n");
++    }
++  }
++  absl::StrAppend(&report, "device=", target.device_description.ToString(),
++                  "\n");
++  VLOG(1) << "Fusion recomputation: " << report;
++  DumpToFileInDir(*variants.before, "fusion-recomputation", "csv", samples_csv);
++  DumpToFileInDir(*variants.before, "fusion-recomputation", "txt", report);
++  DumpToFileInDir(*variants.before, "fusion-recomputation", "before.hlo",
++                  variants.before->ToString());
++  DumpToFileInDir(*variants.before, "fusion-recomputation", "after.hlo",
++                  variants.after->ToString());
++  if (before->has_module() && after->has_module()) {
++    DumpToFileInDir(*variants.before, "fusion-recomputation",
++                    "compiled-before.hlo", before->module().ToString());
++    DumpToFileInDir(*variants.before, "fusion-recomputation",
++                    "compiled-after.hlo", after->module().ToString());
++  }
++  return measurement.decision;
++}
++}  // namespace
++
++RecomputeFusionSideOutputs::Evaluator MakeFusionRecomputationEvaluator(
++    Compiler* compiler, const Compiler::GpuTargetConfig& target,
++    se::StreamExecutor* executor, se::DeviceAddressAllocator* allocator) {
++  // Canonical graphs include constants, layouts and backend configs. The cache
++  // lifetime fixes compiler version, device, flags and profiling policy. Unlike
++  // a process-global cache it cannot reuse a result on a different GPU/context.
++  auto cache = std::make_shared<absl::flat_hash_map<std::string, Decision>>();
++  return [compiler, &target, executor, allocator,
++          cache](const FusionRecomputeVariants& v) -> absl::StatusOr<Decision> {
++    auto print = HloPrintOptions::Canonical()
++                     .set_print_backend_config(true)
++                     .set_print_large_constants(true);
++    const std::string key = absl::StrCat(
++        v.before->config().debug_options().SerializeAsString(), "\nBEFORE\n",
++        v.before->ToString(print), "\nAFTER\n", v.after->ToString(print));
++    auto found = cache->find(key);
++    if (found != cache->end()) return found->second;
++    ABSL_ASSIGN_OR_RETURN(auto decision,
++                          Evaluate(v, compiler, target, executor, allocator));
++    cache->emplace(key, decision);
++    return decision;
++  };
++}
++}  // namespace xla::gpu
+diff --git a/xla/backends/gpu/autotuner/fusion_recomputation.h b/xla/backends/gpu/autotuner/fusion_recomputation.h
+new file mode 100644
+index 0000000000..3e699be7f3
+--- /dev/null
++++ b/xla/backends/gpu/autotuner/fusion_recomputation.h
+@@ -0,0 +1,34 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_BACKENDS_GPU_AUTOTUNER_FUSION_RECOMPUTATION_H_
++#define XLA_BACKENDS_GPU_AUTOTUNER_FUSION_RECOMPUTATION_H_
++
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
++#include "xla/service/compiler.h"
++#include "xla/stream_executor/device_address_allocator.h"
++#include "xla/stream_executor/stream_executor.h"
++
++namespace xla::gpu {
++// The evaluator and its cache are scoped to ONE compilation on ONE device.
++// Compiler/target/executor must outlive the returned function. No cross-process
++// decisions are reused: codegen, flags and device changes require
++// remeasurement.
++RecomputeFusionSideOutputs::Evaluator MakeFusionRecomputationEvaluator(
++    Compiler* compiler, const Compiler::GpuTargetConfig& target,
++    se::StreamExecutor* executor,
++    se::DeviceAddressAllocator* allocator = nullptr);
++}  // namespace xla::gpu
++#endif  // XLA_BACKENDS_GPU_AUTOTUNER_FUSION_RECOMPUTATION_H_
+diff --git a/xla/backends/gpu/autotuner/fusion_recomputation_test.cc b/xla/backends/gpu/autotuner/fusion_recomputation_test.cc
+new file mode 100644
+index 0000000000..64129ff1ea
+--- /dev/null
++++ b/xla/backends/gpu/autotuner/fusion_recomputation_test.cc
+@@ -0,0 +1,81 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/backends/gpu/autotuner/fusion_recomputation.h"
++
++#include <gmock/gmock.h>
++#include <gtest/gtest.h>
++#include "absl/status/status_matchers.h"
++#include "xla/backends/gpu/tests/hlo_pjrt_gpu_test_base.h"
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
++#include "xla/hlo/ir/hlo_module.h"
++#include "xla/stream_executor/platform.h"
++#include "xla/stream_executor/platform_manager.h"
++
++namespace xla::gpu {
++namespace {
++using FusionRecomputationTest = HloPjRtGpuTestBase;
++TEST_F(FusionRecomputationTest, MeasuresNativeRegionAndChecksOutputs) {
++  constexpr char kHlo[] = R"(
++HloModule region
++producer_body {
++  x = f32[4096]{0} parameter(0)
++  y = f32[4096]{0} exponential(x)
++  z = f32[4096]{0} negate(x)
++  ROOT outputs = (f32[4096]{0}, f32[4096]{0}) tuple(y, z)
++}
++consumer_body {
++  y = f32[4096]{0} parameter(0)
++  x = f32[4096]{0} parameter(1)
++  ROOT result = f32[4096]{0} multiply(y, x)
++}
++ENTRY main {
++  x = f32[4096]{0} parameter(0)
++  p = (f32[4096]{0}, f32[4096]{0}) fusion(x), kind=kLoop, calls=producer_body
++  y = f32[4096]{0} get-tuple-element(p), index=0
++  z = f32[4096]{0} get-tuple-element(p), index=1
++  c = f32[4096]{0} fusion(y, x), kind=kLoop, calls=consumer_body
++  ROOT result = (f32[4096]{0}, f32[4096]{0}) tuple(c, z)
++}
++)";
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  ASSERT_OK_AND_ASSIGN(auto* platform, se::PlatformManager::PlatformWithId(
++                                           stream_executor_platform_id()));
++  ASSERT_OK_AND_ASSIGN(auto* executor, platform->ExecutorForDevice(0));
++  auto evaluate = MakeFusionRecomputationEvaluator(
++      compiler(), gpu_target_config(), executor);
++  int evaluated = 0;
++  RecomputeFusionSideOutputs pass(
++      [&](const FusionRecomputeVariants& variants) {
++        ++evaluated;
++        auto decision = evaluate(variants);
++        EXPECT_OK(decision.status());
++        // Exercise the compilation-local cache on the exact same pair of
++        // graphs.
++        auto cached = evaluate(variants);
++        EXPECT_OK(cached.status());
++        if (decision.ok() && cached.ok()) {
++          EXPECT_EQ(decision->IsAllowed(), cached->IsAllowed());
++        }
++        return decision;
++      },
++      /*min_bytes=*/0, /*max_candidates=*/1, /*analyze_only=*/true);
++  ASSERT_OK_AND_ASSIGN(bool changed, pass.Run(module.get()));
++  EXPECT_FALSE(changed);
++  EXPECT_EQ(evaluated, 1);
++  // Never assert a particular performance decision on shared CI hardware.
++}
++}  // namespace
++}  // namespace xla::gpu
+diff --git a/xla/backends/gpu/transforms/BUILD b/xla/backends/gpu/transforms/BUILD
+index 48b69fe462..2d173796f3 100644
+--- a/xla/backends/gpu/transforms/BUILD
++++ b/xla/backends/gpu/transforms/BUILD
+@@ -2462,6 +2462,54 @@ cc_library(
+     ],
+ )
+ 
++cc_library(
++    name = "recompute_fusion_side_outputs",
++    srcs = ["recompute_fusion_side_outputs.cc"],
++    hdrs = ["recompute_fusion_side_outputs.h"],
++    deps = [
++        "//xla:shape_util",
++        "//xla:status_macros",
++        "//xla/hlo/ir:hlo",
++        "//xla/hlo/pass:hlo_pass",
++        "//xla/hlo/transforms/simplifiers:hlo_dce",
++        "//xla/service:compilation_environments",
++        "//xla/service:decision",
++        "//xla/service:hlo_module_config",
++        "//xla/service/gpu:backend_configs_cc",
++        "//xla/service/gpu:gpu_fusible",
++        "@com_google_absl//absl/algorithm:container",
++        "@com_google_absl//absl/container:flat_hash_map",
++        "@com_google_absl//absl/container:flat_hash_set",
++        "@com_google_absl//absl/log",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:status_macros",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/strings",
++        "@com_google_absl//absl/strings:string_view",
++    ],
++)
++
++xla_test(
++    name = "recompute_fusion_side_outputs_test",
++    srcs = ["recompute_fusion_side_outputs_test.cc"],
++    backends = ["gpu"],
++    deps = [
++        ":recompute_fusion_side_outputs",
++        "//xla:error_spec",
++        "//xla:shape_util",
++        "//xla/backends/gpu/tests:hlo_pjrt_gpu_test_base",
++        "//xla/hlo/ir:hlo",
++        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
++        "//xla/service:decision",
++        "@com_google_absl//absl/algorithm:container",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:status_matchers",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/strings",
++        "@com_google_googletest//:gtest_main",
++    ],
++)
++
+ xla_cc_test(
+     name = "multi_output_fusion_test",
+     srcs = ["multi_output_fusion_test.cc"],
+diff --git a/xla/backends/gpu/transforms/recompute_fusion_side_outputs.cc b/xla/backends/gpu/transforms/recompute_fusion_side_outputs.cc
+new file mode 100644
+index 0000000000..44755ff7ae
+--- /dev/null
++++ b/xla/backends/gpu/transforms/recompute_fusion_side_outputs.cc
+@@ -0,0 +1,369 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
++
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "absl/algorithm/container.h"
++#include "absl/container/flat_hash_map.h"
++#include "absl/container/flat_hash_set.h"
++#include "absl/log/log.h"
++#include "absl/status/status.h"
++#include "absl/status/status_macros.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/str_cat.h"
++#include "absl/strings/string_view.h"
++#include "xla/hlo/ir/hlo_clone_context.h"
++#include "xla/hlo/ir/hlo_computation.h"
++#include "xla/hlo/ir/hlo_instruction.h"
++#include "xla/hlo/ir/hlo_module.h"
++#include "xla/hlo/ir/hlo_opcode.h"
++#include "xla/hlo/transforms/simplifiers/hlo_dce.h"
++#include "xla/service/compilation_environments.h"
++#include "xla/service/gpu/backend_configs.pb.h"
++#include "xla/service/gpu/gpu_fusible.h"
++#include "xla/service/hlo_module_config.h"
++#include "xla/shape_util.h"
++#include "xla/status_macros.h"
++
++namespace xla::gpu {
++namespace {
++
++// Match existing expressions without adding operands or cloning the producer's
++// input graph. In particular, equal parameter numbers in different fusions do
++// not imply equal values: their outer operands must be the same instruction.
++class ExistingExpression {
++ public:
++  ExistingExpression(HloInstruction* producer, HloInstruction* consumer)
++      : producer_(producer), consumer_(consumer) {}
++
++  HloInstruction* Find(const HloInstruction* instruction) {
++    auto [it, inserted] = matches_.try_emplace(instruction, nullptr);
++    if (!inserted) {
++      return it->second;
++    }
++    if (instruction->HasControlDependencies()) {
++      return nullptr;
++    }
++    if (instruction->opcode() == HloOpcode::kParameter) {
++      const HloInstruction* operand =
++          producer_->operand(instruction->parameter_number());
++      for (int64_t i = 0; i < consumer_->operand_count(); ++i) {
++        if (consumer_->operand(i) == operand) {
++          return matches_[instruction] = consumer_->fused_parameter(i);
++        }
++      }
++      return nullptr;
++    }
++    if (!instruction->IsElementwise() &&
++        instruction->opcode() != HloOpcode::kBitcast &&
++        instruction->opcode() != HloOpcode::kBroadcast &&
++        instruction->opcode() != HloOpcode::kConstant) {
++      return nullptr;
++    }
++    for (const HloInstruction* operand : instruction->operands()) {
++      if (Find(operand) == nullptr) {
++        return nullptr;
++      }
++    }
++    for (HloInstruction* candidate :
++         consumer_->fused_instructions_computation()->instructions()) {
++      if (!candidate->HasControlDependencies() &&
++          instruction->Identical(*candidate, [&](const HloInstruction* lhs,
++                                                 const HloInstruction* rhs) {
++            return matches_.at(lhs) == rhs;
++          })) {
++        return matches_[instruction] = candidate;
++      }
++    }
++    return nullptr;
++  }
++
++ private:
++  HloInstruction* producer_;
++  HloInstruction* consumer_;
++  absl::flat_hash_map<const HloInstruction*, HloInstruction*> matches_;
++};
++
++// Only allow a single elementwise path to an output. A gather, broadcast, or
++// reduction could change the indexing or multiply the recomputation work.
++HloInstruction* ElementwiseOutput(HloInstruction* instruction) {
++  HloInstruction* root = instruction->parent()->root_instruction();
++  while (instruction != root) {
++    if (instruction->user_count() != 1 ||
++        instruction->HasControlDependencies()) {
++      return nullptr;
++    }
++    HloInstruction* user = instruction->users().front();
++    if (user == root && user->opcode() == HloOpcode::kTuple) {
++      return instruction;
++    }
++    if (!user->IsElementwise()) {
++      return nullptr;
++    }
++    instruction = user;
++  }
++  return instruction;
++}
++
++bool IsNativeFusion(const HloInstruction* instruction) {
++  return instruction->opcode() == HloOpcode::kFusion &&
++         (instruction->fusion_kind() == HloInstruction::FusionKind::kInput ||
++          instruction->fusion_kind() == HloInstruction::FusionKind::kLoop) &&
++         !instruction->HasSideEffect() &&
++         !instruction->HasControlDependencies() &&
++         instruction->output_operand_aliasing().empty();
++}
++
++std::optional<FusionRecomputeCandidate> MatchCandidate(
++    HloInstruction* producer, HloInstruction* extraction, int64_t min_bytes) {
++  if (!IsNativeFusion(producer) || !producer->IsMultiOutputFusion() ||
++      producer->IsRoot() || producer->fused_expression_root()->has_sharding() ||
++      !absl::c_all_of(producer->users(), [](const HloInstruction* user) {
++        return user->opcode() == HloOpcode::kGetTupleElement;
++      })) {
++    return std::nullopt;
++  }
++  HloInstruction* expression =
++      producer->fused_expression_root()->mutable_operand(
++          extraction->tuple_index());
++  if (!expression->IsElementwise() || expression->operand_count() == 0 ||
++      expression->HasSideEffect() || expression->HasControlDependencies() ||
++      !expression->shape().IsArray() || expression->shape().is_dynamic() ||
++      ShapeUtil::ByteSizeOf(expression->shape()) < min_bytes ||
++      extraction->IsRoot() || extraction->HasControlDependencies() ||
++      extraction->user_count() != 1 ||
++      absl::c_count(producer->fused_expression_root()->operands(),
++                    expression) != 1 ||
++      absl::c_count_if(producer->users(), [&](const HloInstruction* user) {
++        return user->tuple_index() == extraction->tuple_index();
++      }) != 1) {
++    return std::nullopt;
++  }
++  HloInstruction* consumer = extraction->users().front();
++  if (!IsNativeFusion(consumer) ||
++      absl::c_count(consumer->operands(), extraction) != 1 ||
++      ElementwiseOutput(consumer->fused_parameter(
++          consumer->operand_index(extraction))) == nullptr) {
++    return std::nullopt;
++  }
++  ExistingExpression matcher(producer, consumer);
++  FusionRecomputeCandidate candidate{
++      producer, consumer, extraction, expression, {}};
++  for (const HloInstruction* operand : expression->operands()) {
++    HloInstruction* existing = matcher.Find(operand);
++    if (existing == nullptr) return std::nullopt;
++    candidate.operands.push_back(existing);
++  }
++  return candidate;
++}
++
++absl::Status ApplyCandidate(const FusionRecomputeCandidate& candidate) {
++  HloComputation* body = candidate.consumer->fused_instructions_computation();
++  HloInstruction* parameter = candidate.consumer->fused_parameter(
++      candidate.consumer->operand_index(candidate.extraction));
++  HloInstruction* recomputed =
++      body->AddInstruction(candidate.expression->CloneWithNewOperands(
++          candidate.expression->shape(), candidate.operands));
++  ABSL_RETURN_IF_ERROR(parameter->ReplaceAllUsesWith(recomputed));
++  ABSL_RETURN_IF_ERROR(body->RemoveInstructionAndUnusedOperands(parameter));
++  // Preserve emitter/launch choices but invalidate costs for the old bodies.
++  for (HloInstruction* fusion : {candidate.producer, candidate.consumer}) {
++    ABSL_ASSIGN_OR_RETURN(auto config,
++                          fusion->backend_config<GpuBackendConfig>());
++    config.clear_reification_cost();
++    ABSL_RETURN_IF_ERROR(fusion->set_backend_config(config));
++  }
++  return HloDCE().Run(candidate.consumer->GetModule()).status();
++}
++
++}  // namespace
++
++absl::StatusOr<FusionRecomputeVariants> ExtractFusionRecomputeVariants(
++    const FusionRecomputeCandidate& candidate) {
++  const std::vector<HloInstruction*> order =
++      candidate.producer->parent()->MakeInstructionPostOrder();
++  absl::flat_hash_set<HloInstruction*> descendants;
++  for (HloInstruction* instruction : order) {
++    if (instruction == candidate.producer ||
++        absl::c_any_of(instruction->operands(), [&](HloInstruction* operand) {
++          return descendants.contains(operand);
++        })) {
++      descendants.insert(instruction);
++    }
++  }
++  // Include every path from producer to consumer, not just the saved tensor.
++  // In softmax this includes the second reduction that produces the row sum.
++  absl::flat_hash_set<HloInstruction*> region;
++  std::function<void(HloInstruction*)> include =
++      [&](HloInstruction* instruction) {
++        if (!descendants.contains(instruction) ||
++            !region.insert(instruction).second)
++          return;
++        for (HloInstruction* operand : instruction->operands())
++          include(operand);
++      };
++  include(candidate.consumer);
++  // Preserve producer outputs observable by users outside the region.
++  for (HloInstruction* extraction : candidate.producer->users()) {
++    region.insert(extraction);
++  }
++  if (region.size() > 32) {
++    return absl::UnimplementedError(
++        "recomputation region exceeds tuning budget");
++  }
++  for (HloInstruction* instruction : region) {
++    // An unchanged intermediate reduction may already use Triton. Preserve its
++    // selected configuration and include its real latency in both regions.
++    const bool triton = IsGenericTritonFusion(*instruction) &&
++                        !instruction->HasSideEffect() &&
++                        instruction->output_operand_aliasing().empty();
++    if (instruction->HasControlDependencies() ||
++        (!IsNativeFusion(instruction) && !triton &&
++         instruction->opcode() != HloOpcode::kGetTupleElement &&
++         instruction->opcode() != HloOpcode::kBitcast)) {
++      return absl::UnimplementedError(
++          "unsupported instruction in tuning region");
++    }
++  }
++  HloModuleConfig config;
++  config.set_debug_options(
++      candidate.producer->GetModule()->config().debug_options());
++  auto before = std::make_unique<HloModule>(
++      "fusion_recomputation", config,
++      std::make_unique<CompilationEnvironments>(
++          candidate.producer->GetModule()->comp_envs()));
++  HloCloneContext context(before.get());
++  HloComputation::Builder builder("region");
++  absl::flat_hash_map<HloInstruction*, HloInstruction*> clones;
++  int64_t parameter_number = 0;
++  std::vector<HloInstruction*> outputs;
++  for (HloInstruction* instruction : order) {
++    if (!region.contains(instruction)) continue;
++    std::vector<HloInstruction*> operands;
++    for (HloInstruction* operand : instruction->operands()) {
++      if (!clones.contains(operand)) {
++        if (!operand->shape().IsArray() || operand->shape().is_dynamic()) {
++          return absl::UnimplementedError("non-static-array tuning input");
++        }
++        if (operand->opcode() == HloOpcode::kConstant) {
++          clones[operand] = builder.AddInstruction(operand->Clone());
++        } else {
++          clones[operand] =
++              builder.AddInstruction(HloInstruction::CreateParameter(
++                  parameter_number++, operand->shape(), operand->name()));
++        }
++      }
++      operands.push_back(clones.at(operand));
++    }
++    HloInstruction* clone =
++        builder.AddInstruction(instruction->CloneWithNewOperands(
++            instruction->shape(), operands, &context));
++    clones[instruction] = clone;
++    if (instruction == candidate.consumer || instruction->IsRoot() ||
++        absl::c_any_of(instruction->users(), [&](HloInstruction* user) {
++          return !region.contains(user);
++        })) {
++      outputs.push_back(clone);
++    }
++  }
++  TF_RET_CHECK(!outputs.empty());
++  builder.AddInstruction(HloInstruction::CreateTuple(outputs));
++  before->AddEntryComputationWithLayouts(builder.Build())
++      ->SetExecutionThread(candidate.producer->parent()->execution_thread());
++  auto [after, after_context] = before->CloneWithContext("recomputed");
++  auto* producer =
++      after_context->FindInstruction(clones.at(candidate.producer));
++  auto* extraction =
++      after_context->FindInstruction(clones.at(candidate.extraction));
++  TF_RET_CHECK(producer != nullptr && extraction != nullptr);
++  std::optional<FusionRecomputeCandidate> cloned =
++      MatchCandidate(producer, extraction, 0);
++  TF_RET_CHECK(cloned.has_value());
++  const int64_t bytes = ShapeUtil::ByteSizeOf(candidate.expression->shape());
++  ABSL_RETURN_IF_ERROR(ApplyCandidate(*cloned));
++  TF_RET_CHECK(ShapeUtil::Equal(
++      before->entry_computation()->root_instruction()->shape(),
++      after->entry_computation()->root_instruction()->shape()));
++  TF_RET_CHECK(before->entry_computation()->num_parameters() ==
++               after->entry_computation()->num_parameters());
++  for (int64_t i = 0; i < before->entry_computation()->num_parameters(); ++i) {
++    TF_RET_CHECK(ShapeUtil::Equal(
++        before->entry_computation()->parameter_instruction(i)->shape(),
++        after->entry_computation()->parameter_instruction(i)->shape()));
++  }
++  return FusionRecomputeVariants{std::move(before), std::move(after), bytes};
++}
++
++absl::StatusOr<bool> RecomputeFusionSideOutputs::RunImpl(
++    HloModule* module,
++    const absl::flat_hash_set<absl::string_view>& execution_threads) {
++  if (!evaluator_) return false;
++  bool changed = false;
++  absl::flat_hash_set<std::string> attempted;
++  for (int64_t attempt = 0; attempt < max_candidates_; ++attempt) {
++    std::optional<FusionRecomputeCandidate> candidate;
++    for (HloComputation* computation :
++         module->MakeNonfusionComputations(execution_threads)) {
++      for (HloInstruction* instruction :
++           computation->MakeInstructionPostOrder()) {
++        if (instruction->opcode() != HloOpcode::kGetTupleElement) continue;
++        const std::string key =
++            absl::StrCat(computation->name(), ":", instruction->name());
++        if (attempted.contains(key)) continue;
++        candidate = MatchCandidate(instruction->mutable_operand(0), instruction,
++                                   min_bytes_);
++        if (candidate) {
++          attempted.insert(key);
++          break;
++        }
++      }
++      if (candidate) break;
++    }
++    if (!candidate) break;
++    const std::string name(candidate->extraction->name());
++    absl::StatusOr<FusionRecomputeVariants> variants =
++        ExtractFusionRecomputeVariants(*candidate);
++    if (!variants.ok()) {
++      VLOG(2) << "Recomputation skipped for " << name << ": "
++              << variants.status();
++      continue;
++    }
++    absl::StatusOr<Decision> decision = evaluator_(*variants);
++    // Compilation/profiling failures must not make a valid program fail.
++    if (!decision.ok()) {
++      VLOG(1) << "Recomputation evaluation failed for " << name << ": "
++              << decision.status();
++      continue;
++    }
++    VLOG(1) << "Recomputation " << name << ": " << decision->Explain();
++    if (decision->IsAllowed() && !analyze_only_) {
++      ABSL_RETURN_IF_ERROR(ApplyCandidate(*candidate));
++      changed = true;
++    }
++    // Restart discovery after each rewrite. Tuple indices, shared inputs and
++    // cost estimates from the previous graph must not survive an accepted edit.
++  }
++  return changed;
++}
++
++}  // namespace xla::gpu
+diff --git a/xla/backends/gpu/transforms/recompute_fusion_side_outputs.h b/xla/backends/gpu/transforms/recompute_fusion_side_outputs.h
+new file mode 100644
+index 0000000000..b7d13f819d
+--- /dev/null
++++ b/xla/backends/gpu/transforms/recompute_fusion_side_outputs.h
+@@ -0,0 +1,94 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_BACKENDS_GPU_TRANSFORMS_RECOMPUTE_FUSION_SIDE_OUTPUTS_H_
++#define XLA_BACKENDS_GPU_TRANSFORMS_RECOMPUTE_FUSION_SIDE_OUTPUTS_H_
++
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <utility>
++#include <vector>
++
++#include "absl/container/flat_hash_set.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/string_view.h"
++#include "xla/hlo/ir/hlo_instruction.h"
++#include "xla/hlo/ir/hlo_module.h"
++#include "xla/hlo/pass/hlo_pass_interface.h"
++#include "xla/service/decision.h"
++
++namespace xla::gpu {
++
++// A single pure elementwise side output. All operands of `expression` have
++// identical expressions in `consumer`; no new fusion inputs are introduced.
++struct FusionRecomputeCandidate {
++  HloInstruction* producer;
++  HloInstruction* consumer;
++  HloInstruction* extraction;
++  HloInstruction* expression;
++  std::vector<HloInstruction*> operands;
++};
++
++// Matched, dependency-preserving regions with identical input/output shapes.
++// The saved intermediate is internal, not an artificial benchmark output.
++struct FusionRecomputeVariants {
++  std::unique_ptr<HloModule> before;
++  std::unique_ptr<HloModule> after;
++  int64_t eliminated_bytes;
++};
++
++absl::StatusOr<FusionRecomputeVariants> ExtractFusionRecomputeVariants(
++    const FusionRecomputeCandidate& candidate);
++
++// Recomputes side outputs inside existing consumer fusions. Run after
++// multi-output fusion and backend configuration assignment, before scheduling.
++// Eligibility is independent of dtype, opcode cost, and whether another
++// producer output is a reduction. Profitability MUST be established by the
++// evaluator; a missing evaluator never rewrites HLO.
++class RecomputeFusionSideOutputs : public HloModulePass {
++ public:
++  using Evaluator = std::function<absl::StatusOr<Decision>(
++      const FusionRecomputeVariants& variants)>;
++
++  // min_bytes and max_candidates bound tuning overhead, not profitability.
++  explicit RecomputeFusionSideOutputs(Evaluator evaluator = {},
++                                      int64_t min_bytes = 64 * 1024 * 1024,
++                                      int64_t max_candidates = 16,
++                                      bool analyze_only = false)
++      : evaluator_(std::move(evaluator)),
++        min_bytes_(min_bytes),
++        max_candidates_(max_candidates),
++        analyze_only_(analyze_only) {}
++
++  absl::string_view name() const override {
++    return "recompute-fusion-side-outputs";
++  }
++
++ protected:
++  absl::StatusOr<bool> RunImpl(
++      HloModule* module,
++      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
++
++ private:
++  Evaluator evaluator_;
++  int64_t min_bytes_;
++  int64_t max_candidates_;
++  bool analyze_only_;
++};
++
++}  // namespace xla::gpu
++
++#endif  // XLA_BACKENDS_GPU_TRANSFORMS_RECOMPUTE_FUSION_SIDE_OUTPUTS_H_
+diff --git a/xla/backends/gpu/transforms/recompute_fusion_side_outputs_test.cc b/xla/backends/gpu/transforms/recompute_fusion_side_outputs_test.cc
+new file mode 100644
+index 0000000000..f68a81817e
+--- /dev/null
++++ b/xla/backends/gpu/transforms/recompute_fusion_side_outputs_test.cc
+@@ -0,0 +1,424 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
++
++#include <string>
++#include <utility>
++
++#include <gmock/gmock.h>
++#include <gtest/gtest.h>
++#include "absl/algorithm/container.h"
++#include "absl/status/status.h"
++#include "absl/status/status_matchers.h"
++#include "absl/status/statusor.h"
++#include "absl/strings/str_replace.h"
++#include "xla/backends/gpu/tests/hlo_pjrt_gpu_test_base.h"
++#include "xla/error_spec.h"
++#include "xla/hlo/ir/hlo_computation.h"
++#include "xla/hlo/ir/hlo_instruction.h"
++#include "xla/hlo/ir/hlo_opcode.h"
++#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
++#include "xla/service/decision.h"
++#include "xla/shape_util.h"
++
++namespace xla::gpu {
++namespace {
++
++// Model the loss fusions with a split reduction and a BF16 logits gradient.
++// The loss output already needs the shifted logits inside the consumer.
++constexpr char kHlo[] = R"(
++HloModule softmax_loss
++
++add {
++  x = f32[] parameter(0)
++  y = f32[] parameter(1)
++  ROOT sum = f32[] add(x, y)
++}
++
++exponential_reduction {
++  logits = bf16[512]{0} parameter(0)
++  row_max = f32[2]{0} parameter(1)
++  converted = f32[512]{0} convert(logits)
++  reshaped = f32[2,256]{1,0} bitcast(converted)
++  max_broadcast = f32[2,256]{1,0} broadcast(row_max), dimensions={0}
++  shifted = f32[2,256]{1,0} subtract(reshaped, max_broadcast)
++  exponential = f32[2,256]{1,0} exponential(shifted)
++  tiles = f32[2,2,128]{2,1,0} bitcast(exponential)
++  zero = f32[] constant(0)
++  partial_sum = f32[2,2]{1,0} reduce(tiles, zero), dimensions={2}, to_apply=add
++  ROOT output = (f32[2,2]{1,0}, f32[2,256]{1,0}) tuple(partial_sum, exponential)
++}
++
++finish_reduction {
++  partial = f32[2,2]{1,0} parameter(0)
++  zero = f32[] constant(0)
++  ROOT sum = f32[2]{0} reduce(partial, zero), dimensions={1}, to_apply=add
++}
++
++gradient_and_loss {
++  saved_exponential = f32[2,256]{1,0} parameter(0)
++  row_sum = f32[2]{0} parameter(1)
++  logits = bf16[512]{0} parameter(2)
++  row_max = f32[2]{0} parameter(3)
++  converted = f32[512]{0} convert(logits)
++  reshaped = f32[2,256]{1,0} bitcast(converted)
++  max_broadcast = f32[2,256]{1,0} broadcast(row_max), dimensions={0}
++  consumer_shifted = f32[2,256]{1,0} subtract(reshaped, max_broadcast)
++  sum_broadcast = f32[2,256]{1,0} broadcast(row_sum), dimensions={0}
++  probabilities = f32[2,256]{1,0} divide(saved_exponential, sum_broadcast)
++  one = f32[] constant(1)
++  target = f32[2,256]{1,0} broadcast(one), dimensions={}
++  derivative = f32[2,256]{1,0} subtract(probabilities, target)
++  gradient = bf16[2,256]{1,0} convert(derivative)
++  zero = f32[] constant(0)
++  loss = f32[2]{0} reduce(consumer_shifted, zero), dimensions={1}, to_apply=add
++  ROOT output = (bf16[2,256]{1,0}, f32[2]{0}) tuple(gradient, loss)
++}
++
++ENTRY main {
++  logits = bf16[512]{0} parameter(0)
++  row_max = f32[2]{0} parameter(1)
++  producer = (f32[2,2]{1,0}, f32[2,256]{1,0}) fusion(logits, row_max), kind=kInput, calls=exponential_reduction
++  partial = f32[2,2]{1,0} get-tuple-element(producer), index=0
++  saved = f32[2,256]{1,0} get-tuple-element(producer), index=1
++  sum = f32[2]{0} fusion(partial), kind=kInput, calls=finish_reduction
++  ROOT consumer = (bf16[2,256]{1,0}, f32[2]{0}) fusion(saved, sum, logits, row_max), kind=kInput, calls=gradient_and_loss
++}
++)";
++
++// Structural/execution tests force the transform independently of hardware
++// timings. Production always uses measured profitability.
++Decision AllowForTest(const FusionRecomputeVariants&) {
++  return Decision::Allow();
++}
++
++std::string WithTritonReduction() {
++  return absl::StrReplaceAll(
++      kHlo,
++      {{"kind=kInput, calls=finish_reduction",
++        R"(kind=kCustom, calls=finish_reduction, backend_config={"fusion_backend_config":{"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1"]}],"num_warps":"4","num_ctas":1,"num_stages":1}}})"}});
++}
++
++using RecomputeFusionSideOutputsTest = HloHardwareIndependentTestBase;
++
++TEST_F(RecomputeFusionSideOutputsTest, ReusesShiftedLogitsAndKeepsReduction) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  HloComputation* entry = module->entry_computation();
++  HloInstruction* producer = entry->GetInstructionWithName("producer");
++  HloInstruction* reduction =
++      producer->fused_expression_root()->mutable_operand(0);
++  HloInstruction* consumer = entry->root_instruction();
++  HloComputation* body = consumer->fused_instructions_computation();
++  HloInstruction* shifted = body->GetInstructionWithName("consumer_shifted");
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_TRUE(changed);
++  EXPECT_EQ(producer->fused_expression_root(), reduction);
++  EXPECT_EQ(producer->shape(), reduction->shape());
++  EXPECT_EQ(entry->GetInstructionWithName("saved"), nullptr);
++  EXPECT_EQ(consumer->operand_count(), 3);
++  HloInstruction* probabilities = body->GetInstructionWithName("probabilities");
++  ASSERT_EQ(probabilities->operand(0)->opcode(), HloOpcode::kExp);
++  EXPECT_EQ(probabilities->operand(0)->operand(0), shifted);
++  ASSERT_OK_AND_ASSIGN(changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, PreservesTritonIntermediate) {
++  ASSERT_OK_AND_ASSIGN(auto module,
++                       ParseAndReturnVerifiedModule(WithTritonReduction()));
++  int evaluated = 0;
++  RecomputeFusionSideOutputs pass(
++      [&](const FusionRecomputeVariants& v) {
++        ++evaluated;
++        for (auto* region : {v.before.get(), v.after.get()}) {
++          EXPECT_EQ(
++              absl::c_count_if(region->entry_computation()->instructions(),
++                               [](HloInstruction* i) {
++                                 return i->opcode() == HloOpcode::kFusion &&
++                                        i->fusion_kind() ==
++                                            HloInstruction::FusionKind::kCustom;
++                               }),
++              1);
++        }
++        return Decision::Allow();
++      },
++      0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_TRUE(changed);
++  EXPECT_EQ(evaluated, 1);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, KeepsSmallSideOutput) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  RecomputeFusionSideOutputs pass(AllowForTest);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, RequiresIdenticalInputExpression) {
++  std::string hlo = absl::StrReplaceAll(
++      kHlo,
++      {{"consumer_shifted = f32[2,256]{1,0} subtract(reshaped, max_broadcast)",
++        "consumer_shifted = f32[2,256]{1,0} add(reshaped, max_broadcast)"}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, RequiresSameOuterOperands) {
++  std::string hlo = absl::StrReplaceAll(
++      kHlo, {{"ROOT consumer =",
++              "other_logits = bf16[512]{0} negate(logits)\n  ROOT consumer ="},
++             {"fusion(saved, sum, logits, row_max)",
++              "fusion(saved, sum, other_logits, row_max)"}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, KeepsSharedSideOutput) {
++  std::string hlo = absl::StrReplaceAll(
++      kHlo, {{"ROOT consumer =",
++              "extra = f32[2,256]{1,0} negate(saved)\n  ROOT consumer ="}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, KeepsDuplicateTupleExtraction) {
++  std::string hlo = absl::StrReplaceAll(
++      kHlo, {{"ROOT consumer =",
++              "extra = f32[2,256]{1,0} get-tuple-element(producer), index=1\n  "
++              "ROOT consumer ="}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, KeepsNonElementwiseConsumerUse) {
++  std::string hlo = absl::StrReplaceAll(
++      kHlo, {{"probabilities =",
++              "reversed = f32[2,256]{1,0} reverse(saved_exponential), "
++              "dimensions={1}\n  probabilities ="},
++             {"divide(saved_exponential, sum_broadcast)",
++              "divide(reversed, sum_broadcast)"}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, KeepsControlDependencies) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  HloComputation* entry = module->entry_computation();
++  ASSERT_OK(entry->GetInstructionWithName("producer")
++                ->AddControlDependencyTo(entry->root_instruction()));
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, MissingOrNegativeCostKeepsGraph) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  RecomputeFusionSideOutputs missing({}, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&missing, module.get()));
++  EXPECT_FALSE(changed);
++  RecomputeFusionSideOutputs negative(
++      [](const auto&) { return Decision::Forbid("measured regression"); }, 0);
++  ASSERT_OK_AND_ASSIGN(changed, RunHloPass(&negative, module.get()));
++  EXPECT_FALSE(changed);
++  EXPECT_NE(module->entry_computation()->GetInstructionWithName("saved"),
++            nullptr);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, EvaluationFailureKeepsGraph) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  RecomputeFusionSideOutputs pass(
++      [](const auto&) -> absl::StatusOr<Decision> {
++        return absl::ResourceExhaustedError("profiling allocation failed");
++      },
++      0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_FALSE(changed);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, AnalyzeOnlyAndBudgetDoNotRewrite) {
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHlo));
++  int evaluated = 0;
++  auto evaluate = [&](const auto&) {
++    ++evaluated;
++    return Decision::Allow();
++  };
++  RecomputeFusionSideOutputs analyze(evaluate, 0, 16, /*analyze_only=*/true);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&analyze, module.get()));
++  EXPECT_FALSE(changed);
++  EXPECT_EQ(evaluated, 1);
++  RecomputeFusionSideOutputs no_budget(evaluate, 0, 0);
++  ASSERT_OK_AND_ASSIGN(changed, RunHloPass(&no_budget, module.get()));
++  EXPECT_FALSE(changed);
++  EXPECT_EQ(evaluated, 1);
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, RegionPreservesDependenciesAndOutputs) {
++  // Keep an additional use of the partial reduction outside the region.
++  std::string hlo =
++      absl::StrReplaceAll(kHlo, {{"ROOT consumer =", "consumer ="},
++                                 {"calls=gradient_and_loss",
++                                  "calls=gradient_and_loss\n ROOT result = "
++                                  "((bf16[2,256]{1,0}, f32[2]{0}), "
++                                  "f32[2,2]{1,0}) tuple(consumer, partial)"}});
++  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo));
++  int evaluated = 0;
++  RecomputeFusionSideOutputs pass(
++      [&](const FusionRecomputeVariants& v) {
++        ++evaluated;
++        EXPECT_EQ(v.eliminated_bytes, 2 * 256 * sizeof(float));
++        EXPECT_EQ(v.before->entry_computation()->num_parameters(), 2);
++        EXPECT_EQ(v.after->entry_computation()->num_parameters(), 2);
++        EXPECT_TRUE(ShapeUtil::Equal(v.before->result_shape(),
++                                     v.after->result_shape()));
++        for (auto* region : {v.before.get(), v.after.get()}) {
++          EXPECT_EQ(
++              absl::c_count_if(region->entry_computation()->instructions(),
++                               [](HloInstruction* i) {
++                                 return i->opcode() == HloOpcode::kFusion;
++                               }),
++              3);
++        }
++        EXPECT_EQ(
++            v.before->entry_computation()->root_instruction()->operand_count(),
++            2);
++        EXPECT_NE(
++            v.before->entry_computation()->GetInstructionWithName("saved"),
++            nullptr);
++        EXPECT_EQ(v.after->entry_computation()->GetInstructionWithName("saved"),
++                  nullptr);
++        return Decision::Allow();
++      },
++      0);
++  ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++  EXPECT_TRUE(changed);
++  EXPECT_EQ(evaluated, 1);
++}
++
++constexpr char kLoopHlo[] = R"(
++HloModule loop_side_output
++producer_body {
++  x = f32[256]{0} parameter(0)
++  y = f32[256]{0} parameter(1)
++  side = f32[256]{0} add(x, y)
++  other = f32[256]{0} negate(x)
++  ROOT outputs = (f32[256]{0}, f32[256]{0}) tuple(other, side)
++}
++consumer_body {
++  saved = f32[256]{0} parameter(0)
++  x = f32[256]{0} parameter(1)
++  y = f32[256]{0} parameter(2)
++  product = f32[256]{0} multiply(x, y)
++  ROOT output = f32[256]{0} add(saved, product)
++}
++ENTRY main {
++  x = f32[256]{0} parameter(0)
++  y = f32[256]{0} parameter(1)
++  producer = (f32[256]{0}, f32[256]{0}) fusion(x, y), kind=kLoop, calls=producer_body
++  other = f32[256]{0} get-tuple-element(producer), index=0
++  saved = f32[256]{0} get-tuple-element(producer), index=1
++  consumer = f32[256]{0} fusion(saved, x, y), kind=kLoop, calls=consumer_body
++  ROOT result = (f32[256]{0}, f32[256]{0}) tuple(other, consumer)
++}
++)";
++
++TEST_F(RecomputeFusionSideOutputsTest, BinaryLoopSideOutputsAcrossDtypes) {
++  for (const char* dtype : {"f16", "bf16", "f32", "f64", "s32"}) {
++    SCOPED_TRACE(dtype);
++    ASSERT_OK_AND_ASSIGN(auto module,
++                         ParseAndReturnVerifiedModule(
++                             absl::StrReplaceAll(kLoopHlo, {{"f32", dtype}})));
++    RecomputeFusionSideOutputs pass(AllowForTest, 0);
++    ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++    ASSERT_TRUE(changed);
++    auto* consumer =
++        module->entry_computation()->GetInstructionWithName("consumer");
++    EXPECT_EQ(consumer->operand_count(), 2);
++    EXPECT_EQ(consumer->fused_expression_root()->operand(0)->opcode(),
++              HloOpcode::kAdd);
++  }
++}
++
++TEST_F(RecomputeFusionSideOutputsTest, UnaryOperationsBeyondExponential) {
++  for (const char* operation : {"negate", "sine", "sqrt", "tanh"}) {
++    SCOPED_TRACE(operation);
++    ASSERT_OK_AND_ASSIGN(
++        auto module,
++        ParseAndReturnVerifiedModule(absl::StrReplaceAll(
++            kLoopHlo, {{"add(x, y)", std::string(operation) + "(x)"},
++                       {"other = f32[256]{0} negate(x)",
++                        "other = f32[256]{0} negate(y)"}})));
++    RecomputeFusionSideOutputs pass(AllowForTest, 0);
++    ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++    EXPECT_TRUE(changed);
++  }
++}
++
++using RecomputeFusionSideOutputsExecutionTest = HloPjRtGpuTestBase;
++
++TEST_F(RecomputeFusionSideOutputsExecutionTest, PreservesResults) {
++  ASSERT_OK_AND_ASSIGN(auto before, ParseAndReturnVerifiedModule(kHlo));
++  auto after = before->Clone();
++  RecomputeFusionSideOutputs pass(AllowForTest, /*min_bytes=*/0);
++  ASSERT_OK_AND_ASSIGN(bool changed, pass.Run(after.get()));
++  ASSERT_TRUE(changed);
++  // Bypass optimization so both sides execute their intended fusion boundaries.
++  EXPECT_TRUE(RunAndCompareTwoModules(std::move(before), std::move(after),
++                                      ErrorSpec{1e-5, 1e-5},
++                                      /*run_hlo_passes=*/false));
++}
++
++TEST_F(RecomputeFusionSideOutputsExecutionTest,
++       PreservesResultsWithTritonIntermediate) {
++  ASSERT_OK_AND_ASSIGN(auto before,
++                       ParseAndReturnVerifiedModule(WithTritonReduction()));
++  auto after = before->Clone();
++  RecomputeFusionSideOutputs pass(AllowForTest, 0);
++  ASSERT_OK_AND_ASSIGN(bool changed, pass.Run(after.get()));
++  ASSERT_TRUE(changed);
++  EXPECT_TRUE(RunAndCompareTwoModules(std::move(before), std::move(after),
++                                      ErrorSpec{1e-5, 1e-5}, false));
++}
++
++TEST_F(RecomputeFusionSideOutputsExecutionTest,
++       PreservesBinaryResultsAcrossDtypes) {
++  for (const char* dtype : {"f16", "bf16", "f32", "f64", "s32"}) {
++    SCOPED_TRACE(dtype);
++    ASSERT_OK_AND_ASSIGN(auto before,
++                         ParseAndReturnVerifiedModule(
++                             absl::StrReplaceAll(kLoopHlo, {{"f32", dtype}})));
++    auto after = before->Clone();
++    RecomputeFusionSideOutputs pass(AllowForTest, 0);
++    ASSERT_OK_AND_ASSIGN(bool changed, pass.Run(after.get()));
++    ASSERT_TRUE(changed);
++    EXPECT_TRUE(RunAndCompareTwoModules(std::move(before), std::move(after),
++                                        ErrorSpec{0, 0}, false));
++  }
++}
++
++}  // namespace
++}  // namespace xla::gpu
+diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
+index 9f75f6cee5..b92e3f1582 100644
+--- a/xla/debug_options_flags.cc
++++ b/xla/debug_options_flags.cc
+@@ -49,7 +49,6 @@ limitations under the License.
+ #include "absl/time/time.h"
+ #include "google/protobuf/descriptor.h"
+ #include "google/protobuf/text_format.h"
+-#include "tsl/platform/cpu_info.h"  // NOLINT
+ #include "xla/backends/autotuner/backends.pb.h"
+ #include "xla/debug_options_parsers.h"
+ #include "xla/hlo/pass/hlo_pass_filter.h"
+@@ -60,6 +59,7 @@ limitations under the License.
+ #include "xla/tsl/util/command_line_flags.h"
+ #include "xla/xla.pb.h"
+ #include "xla/xla_data.pb.h"
++#include "tsl/platform/cpu_info.h"  // NOLINT
+ 
+ namespace xla {
+ 
+@@ -553,6 +553,9 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+       DebugOptions::COLLECTIVE_KERNEL_ALL_REDUCE);
+   opts.set_xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel(true);
+   opts.set_xla_gpu_experimental_enable_fusion_autotuner(true);
++  opts.set_xla_gpu_experimental_fusion_recomputation(0);
++  opts.set_xla_gpu_fusion_recomputation_min_bytes(64 * 1024 * 1024);
++  opts.set_xla_gpu_fusion_recomputation_max_candidates(16);
+   opts.set_xla_gpu_experimental_max_unroll_factor(32);
+   opts.set_xla_gpu_experimental_pack_dot_operands_along_k_dimension(true);
+   opts.set_xla_unsupported_crash_on_hlo_pass_fix_max_iterations(false);
+@@ -3892,6 +3895,27 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+       "Limits the thunk buffer debug instrumentation to thunks with profile "
+       "annotations matching one or more regexes passed as comma-separated "
+       "string."));
++  flag_list->push_back(tsl::Flag(
++      "xla_gpu_experimental_fusion_recomputation",
++      int32_setter_for(
++          &DebugOptions::set_xla_gpu_experimental_fusion_recomputation),
++      debug_options->xla_gpu_experimental_fusion_recomputation(),
++      "Fusion side-output recomputation: 0=off, 1=measure only, 2=apply "
++      "measured "
++      "improvements. Profiles 50 samples per variant; requires a GPU."));
++  flag_list->push_back(
++      tsl::Flag("xla_gpu_fusion_recomputation_min_bytes",
++                int64_setter_for(
++                    &DebugOptions::set_xla_gpu_fusion_recomputation_min_bytes),
++                debug_options->xla_gpu_fusion_recomputation_min_bytes(),
++                "Minimum side-output size to consider for recomputation "
++                "(tuning budget)."));
++  flag_list->push_back(tsl::Flag(
++      "xla_gpu_fusion_recomputation_max_candidates",
++      int64_setter_for(
++          &DebugOptions::set_xla_gpu_fusion_recomputation_max_candidates),
++      debug_options->xla_gpu_fusion_recomputation_max_candidates(),
++      "Maximum recomputation candidates measured per module (tuning budget)."));
+   flag_list->push_back(tsl::Flag(
+       "xla_gpu_experimental_enable_fusion_autotuner",
+       bool_setter_for(
+diff --git a/xla/service/gpu/BUILD b/xla/service/gpu/BUILD
+index 98221e9f0b..d5e1011e51 100644
+--- a/xla/service/gpu/BUILD
++++ b/xla/service/gpu/BUILD
+@@ -1719,7 +1719,6 @@ cc_library(
+         "//xla/backends/gpu/transforms:sort_iota_fusion",
+         "//xla/backends/gpu/transforms:variadic_op_splitter",
+         "//xla/hlo/ir:hlo",
+-        "//xla/hlo/pass:hlo_pass",
+         "//xla/hlo/pass:hlo_pass_pipeline",
+         "//xla/hlo/transforms/simplifiers:hlo_constant_folding",
+         "//xla/hlo/transforms/simplifiers:hlo_dce",
+@@ -1729,11 +1728,9 @@ cc_library(
+         "//xla/service:hlo_verifier",
+         "//xla/service:layout_assignment",
+         "//xla/service/gpu/model:gpu_hlo_cost_analysis",
+-        "//xla/service/gpu/model:gpu_indexing_performance_model",
+         "//xla/stream_executor:device_description",
+         "//xla/tsl/platform:env",
+         "@llvm-project//mlir:IR",
+-        "@tsl//tsl/platform:env",
+     ],
+ )
+ 
+@@ -1814,6 +1811,7 @@ cc_library(
+         "//xla/backends/cpu/nanort:nanort_executable",
+         "//xla/backends/gpu/autotuner:block_level_emitter",
+         "//xla/backends/gpu/autotuner:factory",
++        "//xla/backends/gpu/autotuner:fusion_recomputation",
+         "//xla/backends/gpu/autotuner:native_emitter",
+         "//xla/backends/gpu/codegen:cubin_custom_kernel_compiler",
+         "//xla/backends/gpu/codegen:kernel_compiler",
+@@ -1870,6 +1868,7 @@ cc_library(
+         "//xla/backends/gpu/transforms:ragged_all_to_all_canonicalizer",
+         "//xla/backends/gpu/transforms:ragged_all_to_all_decomposer",
+         "//xla/backends/gpu/transforms:ragged_all_to_all_multi_host_decomposer",
++        "//xla/backends/gpu/transforms:recompute_fusion_side_outputs",
+         "//xla/backends/gpu/transforms:reduce_scatter_creator",
+         "//xla/backends/gpu/transforms:reduction_degenerate_dim_remover",
+         "//xla/backends/gpu/transforms:reduction_dimension_grouper",
+diff --git a/xla/service/gpu/fusion_pipeline.cc b/xla/service/gpu/fusion_pipeline.cc
+index a2d03a01ba..90ea8fb563 100644
+--- a/xla/service/gpu/fusion_pipeline.cc
++++ b/xla/service/gpu/fusion_pipeline.cc
+@@ -19,7 +19,6 @@ limitations under the License.
+ #include <utility>
+ 
+ #include "mlir/IR/MLIRContext.h"
+-#include "tsl/platform/threadpool.h"
+ #include "xla/backends/gpu/transforms/conv_canonicalizer.h"
+ #include "xla/backends/gpu/transforms/conv_fusion_rewriter.h"
+ #include "xla/backends/gpu/transforms/multi_output_fusion.h"
+@@ -28,7 +27,6 @@ limitations under the License.
+ #include "xla/backends/gpu/transforms/sort_iota_fusion.h"
+ #include "xla/backends/gpu/transforms/variadic_op_splitter.h"
+ #include "xla/hlo/ir/hlo_computation.h"
+-#include "xla/hlo/pass/hlo_pass_fix.h"
+ #include "xla/hlo/pass/hlo_pass_pipeline.h"
+ #include "xla/hlo/transforms/simplifiers/hlo_constant_folding.h"
+ #include "xla/hlo/transforms/simplifiers/hlo_dce.h"
+diff --git a/xla/service/gpu/fusion_pipeline.h b/xla/service/gpu/fusion_pipeline.h
+index 79b46d5fde..45939e4854 100644
+--- a/xla/service/gpu/fusion_pipeline.h
++++ b/xla/service/gpu/fusion_pipeline.h
+@@ -17,12 +17,12 @@ limitations under the License.
+ #define XLA_SERVICE_GPU_FUSION_PIPELINE_H_
+ 
+ #include "mlir/IR/MLIRContext.h"
+-#include "tsl/platform/threadpool.h"
+ #include "xla/hlo/pass/hlo_pass_pipeline.h"
+ #include "xla/service/gpu/alias_info.h"
+-#include "xla/service/gpu/model/gpu_indexing_performance_model.h"
++#include "xla/service/gpu/mlir_context_pool.h"
+ #include "xla/service/hlo_cost_analysis.h"
+ #include "xla/stream_executor/device_description.h"
++#include "xla/tsl/platform/threadpool.h"
+ #include "xla/xla.pb.h"
+ 
+ namespace xla {
+diff --git a/xla/service/gpu/gpu_compiler.cc b/xla/service/gpu/gpu_compiler.cc
+index d438020ba2..ccd88b547e 100644
+--- a/xla/service/gpu/gpu_compiler.cc
++++ b/xla/service/gpu/gpu_compiler.cc
+@@ -41,7 +41,6 @@ limitations under the License.
+ #include "absl/strings/str_format.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/synchronization/mutex.h"
+-#include "google/protobuf/text_format.h"
+ #include "llvm/ADT/StringRef.h"
+ #include "llvm/AsmParser/Parser.h"
+ #include "llvm/IR/DataLayout.h"
+@@ -55,21 +54,16 @@ limitations under the License.
+ #include "llvm/Transforms/Utils/Cloning.h"
+ #include "mlir/IR/MLIRContext.h"
+ #include "mlir/Support/LLVM.h"
++#include "google/protobuf/text_format.h"
+ #include "riegeli/bytes/string_reader.h"
+ #include "riegeli/bytes/string_writer.h"
+-#include "tsl/platform/cpu_info.h"
+-#include "tsl/platform/numbers.h"
+-#include "tsl/platform/path.h"
+-#include "tsl/platform/platform.h"
+-#include "tsl/platform/protobuf.h"  // IWYU pragma: keep
+-#include "tsl/profiler/lib/scoped_annotation.h"
+-#include "tsl/profiler/lib/traceme.h"
+ #include "xla/backends/autotuner/autotuning.pb.h"
+ #include "xla/backends/autotuner/codegen_backend.h"
+ #include "xla/backends/autotuner/in_memory_store.h"
+ #include "xla/backends/cpu/nanort/nanort_client.h"
+ #include "xla/backends/cpu/nanort/nanort_executable.h"
+ #include "xla/backends/cpu/target_machine_options.h"
++#include "xla/backends/gpu/autotuner/fusion_recomputation.h"
+ #include "xla/backends/gpu/codegen/cubin_custom_kernel_compiler.h"
+ #include "xla/backends/gpu/codegen/emitters/mlir_kernel_emitter.h"
+ #include "xla/backends/gpu/codegen/kernel_compiler.h"
+@@ -138,6 +132,7 @@ limitations under the License.
+ #include "xla/backends/gpu/transforms/ragged_all_to_all_canonicalizer.h"
+ #include "xla/backends/gpu/transforms/ragged_all_to_all_decomposer.h"
+ #include "xla/backends/gpu/transforms/ragged_all_to_all_multi_host_decomposer.h"
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
+ #include "xla/backends/gpu/transforms/reduce_scatter_creator.h"
+ #include "xla/backends/gpu/transforms/reduction_degenerate_dim_remover.h"
+ #include "xla/backends/gpu/transforms/reduction_dimension_grouper.h"
+@@ -356,6 +351,13 @@ limitations under the License.
+ #include "xla/util/split_proto/split_proto_reader.h"
+ #include "xla/xla.pb.h"
+ #include "xla/xla_data.pb.h"
++#include "tsl/platform/cpu_info.h"
++#include "tsl/platform/numbers.h"
++#include "tsl/platform/path.h"
++#include "tsl/platform/platform.h"
++#include "tsl/platform/protobuf.h"  // IWYU pragma: keep
++#include "tsl/profiler/lib/scoped_annotation.h"
++#include "tsl/profiler/lib/traceme.h"
+ 
+ namespace xla {
+ namespace gpu {
+@@ -2031,6 +2033,24 @@ absl::Status GpuCompiler::OptimizeHloModule(
+     mlir_context_pool_.Clear();
+   }
+ 
++  // Profile the final native emitter configurations. Running before config
++  // assignment could approve a different emitter/unroll choice from the one
++  // ultimately compiled. Recompute within these fixed kernel boundaries.
++  const DebugOptions& debug = hlo_module->config().debug_options();
++  const int mode = debug.xla_gpu_experimental_fusion_recomputation();
++  if ((mode == 1 || mode == 2) && stream_exec != nullptr) {
++    HloPassPipeline recomputation("fusion-recomputation", compilation_stats);
++    recomputation.AddPass<RecomputeFusionSideOutputs>(
++        MakeFusionRecomputationEvaluator(this, gpu_topology.gpu_target_config(),
++                                         stream_exec, options.device_allocator),
++        debug.xla_gpu_fusion_recomputation_min_bytes(),
++        debug.xla_gpu_fusion_recomputation_max_candidates(),
++        /*analyze_only=*/mode == 1);
++    ABSL_RETURN_IF_ERROR(
++        recomputation.Run(hlo_module, {HloInstruction::kMainExecutionThread})
++            .status());
++  }
++
+   {
+     HloPassPipeline pipeline("propagate-call-metadata", compilation_stats);
+     pipeline.AddPass<PropagateCallMetadata>();
+diff --git a/xla/service/gpu/model/BUILD b/xla/service/gpu/model/BUILD
+index f132263c0d..5bbf60ee03 100644
+--- a/xla/service/gpu/model/BUILD
++++ b/xla/service/gpu/model/BUILD
+@@ -1391,3 +1391,41 @@ cc_embed_data(
+     embedopts = ["--namespace=xla::gpu::config"],
+     flatten = True,
+ )
++
++cc_library(
++    name = "gpu_recomputation_cost_model",
++    srcs = ["gpu_recomputation_cost_model.cc"],
++    hdrs = ["gpu_recomputation_cost_model.h"],
++    deps = [
++        ":combined_gpu_performance_model",
++        ":fusion_analysis_cache",
++        ":gpu_hlo_cost_analysis",
++        ":gpu_performance_model_base",
++        "//xla:shape_util",
++        "//xla:xla_proto_cc",
++        "//xla/hlo/analysis:symbolic_map",
++        "//xla/hlo/ir:hlo",
++        "//xla/service:decision",
++        "//xla/stream_executor:device_description",
++        "@com_google_absl//absl/status:status_macros",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/time",
++        "@com_google_absl//absl/types:span",
++        "@llvm-project//mlir:IR",
++    ],
++)
++
++xla_cc_test(
++    name = "gpu_recomputation_cost_model_test",
++    srcs = ["gpu_recomputation_cost_model_test.cc"],
++    deps = [
++        ":gpu_recomputation_cost_model",
++        "//xla/backends/gpu/transforms:recompute_fusion_side_outputs",
++        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
++        "//xla/service:decision",
++        "//xla/service/gpu:gpu_device_info_for_tests",
++        "@com_google_absl//absl/status:status_matchers",
++        "@com_google_absl//absl/strings",
++        "@com_google_googletest//:gtest_main",
++    ],
++)
+diff --git a/xla/service/gpu/model/gpu_recomputation_cost_model.cc b/xla/service/gpu/model/gpu_recomputation_cost_model.cc
+new file mode 100644
+index 0000000000..c727939137
+--- /dev/null
++++ b/xla/service/gpu/model/gpu_recomputation_cost_model.cc
+@@ -0,0 +1,124 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/service/gpu/model/gpu_recomputation_cost_model.h"
++
++#include <algorithm>
++#include <cmath>
++
++#include "absl/status/status_macros.h"
++#include "absl/time/time.h"
++#include "mlir/IR/MLIRContext.h"
++#include "xla/hlo/analysis/symbolic_expr.h"
++#include "xla/hlo/ir/hlo_computation.h"
++#include "xla/hlo/ir/hlo_instruction.h"
++#include "xla/hlo/ir/hlo_opcode.h"
++#include "xla/service/gpu/model/combined_gpu_performance_model.h"
++#include "xla/service/gpu/model/fusion_analysis_cache.h"
++#include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
++#include "xla/service/gpu/model/gpu_performance_model_base.h"
++#include "xla/shape.h"
++#include "xla/shape_util.h"
++#include "xla/xla.pb.h"
++
++namespace xla::gpu {
++
++absl::StatusOr<RecomputationEstimate> EstimateRecomputationRegion(
++    HloModule& module, const se::DeviceDescription& device) {
++  GpuHloCostAnalysis analysis({.shape_size =
++                                   [](const Shape& shape) {
++                                     return ShapeUtil::ByteSizeOf(
++                                         shape, /*pointer_size=*/8);
++                                   },
++                               .count_multiple_input_accesses = true},
++                              device);
++  ABSL_RETURN_IF_ERROR(module.entry_computation()->Accept(&analysis));
++  // Fresh caches: before/after graphs must never share instruction estimates.
++  mlir::MLIRContext context;
++  context.disableMultithreading();
++  RegisterSymbolicExprStorage(&context);
++  HloFusionAnalysisCache fusion_cache(device);
++  const auto& debug = module.config().debug_options();
++  CombinedGpuPerformanceModel model(
++      device, fusion_cache, context,
++      [](const Shape& shape) { return ShapeUtil::ByteSizeOf(shape, 8); },
++      debug.xla_gpu_experimental_enable_tiling_propagation(),
++      debug.xla_gpu_experimental_enable_same_shape_multi_output_fusion());
++  RecomputationEstimate total;
++  for (HloInstruction* instruction :
++       module.entry_computation()->instructions()) {
++    if (instruction->opcode() != HloOpcode::kFusion) continue;
++    ABSL_ASSIGN_OR_RETURN(auto estimate, model.EstimateRunTimeForInstruction(
++                                             instruction, &analysis));
++    total.duration_ns += absl::ToDoubleNanoseconds(
++        estimate.exec_time + GpuPerformanceModelBase::kKernelLaunchOverhead);
++    total.compute_ns += absl::ToDoubleNanoseconds(estimate.compute_time);
++    total.read_ns += absl::ToDoubleNanoseconds(estimate.read_time);
++    total.write_ns += absl::ToDoubleNanoseconds(estimate.write_time);
++    total.bytes_read += estimate.bytes_read;
++    total.bytes_written += estimate.bytes_written;
++    ++total.kernels;
++  }
++  return total;
++}
++
++RecomputationMeasurement EvaluateRecomputationMeasurements(
++    absl::Span<const RecomputationSample> samples) {
++  RecomputationMeasurement result;
++  if (samples.size() < 25) {
++    result.decision = Decision::Forbid("fewer than 25 ABBA blocks");
++    return result;
++  }
++  double first_gain = 0;
++  double second_gain = 0;
++  double squared_deviations = 0;
++  int64_t count = 0;
++  for (const auto& sample : samples) {
++    for (double ns : {sample.before_first_ns, sample.after_first_ns,
++                      sample.after_second_ns, sample.before_second_ns}) {
++      if (!std::isfinite(ns) || ns <= 0) {
++        result.decision = Decision::Forbid("invalid profiling duration");
++        return result;
++      }
++    }
++    const double before =
++        (sample.before_first_ns + sample.before_second_ns) / 2;
++    const double after = (sample.after_first_ns + sample.after_second_ns) / 2;
++    const double gain = before - after;
++    ++count;
++    result.before_ns += (before - result.before_ns) / count;
++    result.after_ns += (after - result.after_ns) / count;
++    const double delta = gain - result.gain_ns;
++    result.gain_ns += delta / count;
++    squared_deviations += delta * (gain - result.gain_ns);
++    first_gain +=
++        (sample.before_first_ns - sample.after_first_ns - first_gain) / count;
++    second_gain +=
++        (sample.before_second_ns - sample.after_second_ns - second_gain) /
++        count;
++  }
++  result.uncertainty_ns =
++      3 * std::sqrt(std::max(0.0, squared_deviations) / (count * (count - 1)));
++  result.required_gain_ns = std::max(1000.0, 0.01 * result.before_ns);
++  if (std::min(first_gain, second_gain) <= result.required_gain_ns ||
++      result.gain_ns - result.uncertainty_ns <= result.required_gain_ns) {
++    result.decision =
++        Decision::Forbid("gain does not exceed noise/order/policy margin");
++  } else {
++    result.decision = Decision::Allow();
++  }
++  return result;
++}
++}  // namespace xla::gpu
+diff --git a/xla/service/gpu/model/gpu_recomputation_cost_model.h b/xla/service/gpu/model/gpu_recomputation_cost_model.h
+new file mode 100644
+index 0000000000..18561bafc6
+--- /dev/null
++++ b/xla/service/gpu/model/gpu_recomputation_cost_model.h
+@@ -0,0 +1,69 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_SERVICE_GPU_MODEL_GPU_RECOMPUTATION_COST_MODEL_H_
++#define XLA_SERVICE_GPU_MODEL_GPU_RECOMPUTATION_COST_MODEL_H_
++
++#include <cstdint>
++
++#include "absl/status/statusor.h"
++#include "absl/types/span.h"
++#include "xla/hlo/ir/hlo_module.h"
++#include "xla/service/decision.h"
++#include "xla/stream_executor/device_description.h"
++
++namespace xla::gpu {
++
++// Advisory estimates for a dependency-preserving region, NOT for merging its
++// kernels. Unknown instruction profiles, occupancy and inter-kernel cache state
++// make these uncalibrated; they must never independently authorize a rewrite.
++struct RecomputationEstimate {
++  double duration_ns = 0;
++  double compute_ns = 0;
++  double read_ns = 0;
++  double write_ns = 0;
++  int64_t bytes_read = 0;
++  int64_t bytes_written = 0;
++  int64_t kernels = 0;
++};
++absl::StatusOr<RecomputationEstimate> EstimateRecomputationRegion(
++    HloModule& module, const se::DeviceDescription& device);
++
++// One ABBA block: A=materialize, B=recompute. Opposite orders mitigate linear
++// drift. All four samples are warm, whole-region GPU execution times.
++struct RecomputationSample {
++  double before_first_ns;
++  double after_first_ns;
++  double after_second_ns;
++  double before_second_ns;
++};
++struct RecomputationMeasurement {
++  double before_ns = 0;
++  double after_ns = 0;
++  double gain_ns = 0;
++  double uncertainty_ns = 0;
++  double required_gain_ns = 0;
++  Decision decision = Decision::Forbid("not measured");
++};
++
++// Require >=25 ABBA blocks, a gain exceeding both 1% and 1us,
++// a three-standard-error margin, and agreement between the two orders. This is
++// a conservative tuning policy, not a calibrated statistical guarantee or an
++// end-to-end latency estimate. Noise, invalid samples and small gains reject.
++RecomputationMeasurement EvaluateRecomputationMeasurements(
++    absl::Span<const RecomputationSample> samples);
++
++}  // namespace xla::gpu
++#endif  // XLA_SERVICE_GPU_MODEL_GPU_RECOMPUTATION_COST_MODEL_H_
+diff --git a/xla/service/gpu/model/gpu_recomputation_cost_model_test.cc b/xla/service/gpu/model/gpu_recomputation_cost_model_test.cc
+new file mode 100644
+index 0000000000..58b7c2d39c
+--- /dev/null
++++ b/xla/service/gpu/model/gpu_recomputation_cost_model_test.cc
+@@ -0,0 +1,138 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/service/gpu/model/gpu_recomputation_cost_model.h"
++
++#include <limits>
++#include <vector>
++
++#include <gmock/gmock.h>
++#include <gtest/gtest.h>
++#include "absl/status/status_matchers.h"
++#include "absl/strings/str_replace.h"
++#include "xla/backends/gpu/transforms/recompute_fusion_side_outputs.h"
++#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
++#include "xla/service/decision.h"
++#include "xla/service/gpu/gpu_device_info_for_tests.h"
++
++namespace xla::gpu {
++namespace {
++constexpr char kLoopHlo[] = R"(
++HloModule loop_side_output
++producer_body {
++  x = f32[256]{0} parameter(0)
++  y = f32[256]{0} parameter(1)
++  side = f32[256]{0} add(x, y)
++  other = f32[256]{0} negate(x)
++  ROOT outputs = (f32[256]{0}, f32[256]{0}) tuple(other, side)
++}
++consumer_body {
++  saved = f32[256]{0} parameter(0)
++  x = f32[256]{0} parameter(1)
++  y = f32[256]{0} parameter(2)
++  product = f32[256]{0} multiply(x, y)
++  ROOT output = f32[256]{0} add(saved, product)
++}
++ENTRY main {
++  x = f32[256]{0} parameter(0)
++  y = f32[256]{0} parameter(1)
++  producer = (f32[256]{0}, f32[256]{0}) fusion(x, y), kind=kLoop, calls=producer_body
++  other = f32[256]{0} get-tuple-element(producer), index=0
++  saved = f32[256]{0} get-tuple-element(producer), index=1
++  consumer = f32[256]{0} fusion(saved, x, y), kind=kLoop, calls=consumer_body
++  ROOT result = (f32[256]{0}, f32[256]{0}) tuple(other, consumer)
++}
++)";
++
++using RecomputationEstimateTest = HloHardwareIndependentTestBase;
++TEST_F(RecomputationEstimateTest, AccountsForDtypeBytesWithoutMergingKernels) {
++  for (const char* dtype : {"f16", "bf16", "f32"}) {
++    SCOPED_TRACE(dtype);
++    ASSERT_OK_AND_ASSIGN(auto module,
++                         ParseAndReturnVerifiedModule(
++                             absl::StrReplaceAll(kLoopHlo, {{"f32", dtype}})));
++    int evaluated = 0;
++    RecomputeFusionSideOutputs pass(
++        [&](const FusionRecomputeVariants& v) {
++          ++evaluated;
++          auto device = TestGpuDeviceInfo::RTXA6000DeviceInfo();
++          auto before = EstimateRecomputationRegion(*v.before, device);
++          auto after = EstimateRecomputationRegion(*v.after, device);
++          EXPECT_OK(before.status());
++          EXPECT_OK(after.status());
++          if (before.ok() && after.ok()) {
++            EXPECT_EQ(before->kernels, 2);
++            EXPECT_EQ(after->kernels, 2);
++            EXPECT_EQ(before->bytes_written - after->bytes_written,
++                      v.eliminated_bytes);
++            EXPECT_GT(before->bytes_read, after->bytes_read);
++            EXPECT_GT(before->duration_ns, 0);
++            EXPECT_GT(after->duration_ns, 0);
++          }
++          return Decision::Forbid("estimate alone must not approve");
++        },
++        0);
++    ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
++    EXPECT_FALSE(changed);
++    EXPECT_EQ(evaluated, 1);
++  }
++}
++
++TEST(RecomputationMeasurementTest, AcceptsStableGain) {
++  std::vector<RecomputationSample> samples(25, {100000, 80000, 80000, 100000});
++  auto result = EvaluateRecomputationMeasurements(samples);
++  EXPECT_TRUE(result.decision.IsAllowed());
++  EXPECT_DOUBLE_EQ(result.gain_ns, 20000);
++  EXPECT_DOUBLE_EQ(result.uncertainty_ns, 0);
++}
++TEST(RecomputationMeasurementTest, RejectsRegressionsAndSmallGains) {
++  for (double after : {110000, 100000, 99500}) {
++    std::vector<RecomputationSample> samples(25,
++                                             {100000, after, after, 100000});
++    EXPECT_FALSE(
++        EvaluateRecomputationMeasurements(samples).decision.IsAllowed());
++  }
++  std::vector<RecomputationSample> samples(25, {2000, 1500, 1500, 2000});
++  EXPECT_FALSE(EvaluateRecomputationMeasurements(samples).decision.IsAllowed());
++}
++TEST(RecomputationMeasurementTest, RejectsNoiseDespitePositiveMean) {
++  std::vector<RecomputationSample> samples;
++  for (int i = 0; i < 25; ++i) {
++    double after = (i % 2 == 0) ? 50000 : 140000;
++    samples.push_back({100000, after, after, 100000});
++  }
++  auto result = EvaluateRecomputationMeasurements(samples);
++  EXPECT_GT(result.gain_ns, 0);
++  EXPECT_FALSE(result.decision.IsAllowed());
++}
++TEST(RecomputationMeasurementTest, RejectsOrderBias) {
++  std::vector<RecomputationSample> samples(25, {100000, 50000, 110000, 100000});
++  auto result = EvaluateRecomputationMeasurements(samples);
++  EXPECT_GT(result.gain_ns, 0);
++  EXPECT_FALSE(result.decision.IsAllowed());
++}
++TEST(RecomputationMeasurementTest, RejectsInsufficientAndInvalidData) {
++  std::vector<RecomputationSample> samples(24, {100000, 80000, 80000, 100000});
++  EXPECT_FALSE(EvaluateRecomputationMeasurements(samples).decision.IsAllowed());
++  samples.push_back(samples.front());
++  for (double invalid : {0.0, -1.0, std::numeric_limits<double>::infinity(),
++                         std::numeric_limits<double>::quiet_NaN()}) {
++    samples.back().before_first_ns = invalid;
++    EXPECT_FALSE(
++        EvaluateRecomputationMeasurements(samples).decision.IsAllowed());
++  }
++}
++}  // namespace
++}  // namespace xla::gpu
+diff --git a/xla/xla.proto b/xla/xla.proto
+index d696df8c9d..b1ec91f4eb 100644
+--- a/xla/xla.proto
++++ b/xla/xla.proto
+@@ -1947,7 +1947,14 @@ message DebugOptions {
+   // Requires sm_90+ and CUDA 13.3+ (tileiras) at runtime. Off by default.
+   optional bool xla_gpu_experimental_enable_tensor_ir = 557;
+ 
+-  // Next id: 558
++  // Fusion side-output recomputation: 0=off, 1=measure only, 2=apply measured
++  // improvements. Requires a GPU; analytical predictions alone never approve.
++  optional int32 xla_gpu_experimental_fusion_recomputation = 558;
++  // Candidate size and count limits bound autotuning overhead, not profitability.
++  optional int64 xla_gpu_fusion_recomputation_min_bytes = 559;
++  optional int64 xla_gpu_fusion_recomputation_max_candidates = 560;
++
++  // Next id: 561
+ 
+   // Extra options to pass to the compilation backend (e.g. LLVM); specific
+   // interpretation of these values is left to the backend.

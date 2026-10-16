@@ -1,0 +1,43 @@
+[
+  {
+    "variant": "base",
+    "commit": "ab7771db404bbc19b519951e0099ee0939c28968",
+    "tree": "49a1ac1ff984361efb4beb186a67bfb5b2a68bf1",
+    "archive_sha256": "35c54013f0dba2c589605d1abc90ac663151349627ed9a7e0e38a2f736492591",
+    "archive": "/home/shawnw/workload-runs/ds3-ga2-pr-comparison-20261016/base.tar",
+    "worktree": "/home/shawnw/worktrees/xla-ds3-ga2-base"
+  },
+  {
+    "variant": "pr50182",
+    "commit": "5e6ae0630a537793e4868aa80f468e58f187448f",
+    "tree": "4b7cd7440e677a494bc60bfc86595efe03a754d0",
+    "archive_sha256": "5605f3ad9933cd807e6fd8e0fa250cfed53884171cfdd31a64cfb6ec284e9dae",
+    "archive": "/home/shawnw/workload-runs/ds3-ga2-pr-comparison-20261016/pr50182.tar",
+    "worktree": "/home/shawnw/worktrees/xla-ds3-ga2-pr50182"
+  },
+  {
+    "variant": "pr50278",
+    "commit": "1e885bb0485ef1e44977875b5ce8acf5513dd53d",
+    "tree": "e7a730e8219b1dea836a8251148fcacdbf495e03",
+    "archive_sha256": "951b78eabc81740598554011252f8d247c7338132b60f81fb7bc6cba293afa33",
+    "archive": "/home/shawnw/workload-runs/ds3-ga2-pr-comparison-20261016/pr50278.tar",
+    "worktree": "/home/shawnw/worktrees/xla-ds3-ga2-pr50278",
+    "adaptation": "Moved DebugOptions field number from 556 to 558 because baseline already uses 556 for deterministic Triton ops; preserved baseline TensorIR field 557. No algorithm changes."
+  },
+  {
+    "variant": "pr50281",
+    "commit": "feb2d409c9b6f61baf2f3a69821f470127db1c84",
+    "tree": "3d6ae0abd2bb287b8b76793bda60b4ecedb9b32f",
+    "archive_sha256": "bac1126e5266ba29549cd500ddec877695198a9488c498712a2f86874beb0083",
+    "archive": "/home/shawnw/workload-runs/ds3-ga2-pr-comparison-20261016/pr50281.tar",
+    "worktree": "/home/shawnw/worktrees/xla-ds3-ga2-pr50281"
+  },
+  {
+    "variant": "pr50286",
+    "commit": "5712546e4643a684c9705c66b5eef8289b78ff2e",
+    "tree": "8f8e9144a534abfc2cbee35599c835a6c6f14829",
+    "archive_sha256": "e16b8573eef783ddf0905b1fde3670292ec2a10e4d5a2055ef429d02f8d4928e",
+    "archive": "/home/shawnw/workload-runs/ds3-ga2-pr-comparison-20261016/pr50286.tar",
+    "worktree": "/home/shawnw/worktrees/xla-ds3-ga2-pr50286"
+  }
+]

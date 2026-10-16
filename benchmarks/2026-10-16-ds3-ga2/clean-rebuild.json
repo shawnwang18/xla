@@ -1,0 +1,8 @@
+{
+  "variant": "pr50286",
+  "reason": "Persistent CompileOptions constructor crash; rule out incremental or remote action-cache inconsistency",
+  "jax_binding_restored": true,
+  "remote_accept_cached": false,
+  "fresh_output_root": "/home/scratch.shawnw_inf/workload-runs/ds3-ga2-pr-comparison-20261016/build/fresh-pr50286-bazel",
+  "no_optimization_code_changes": true
+}

@@ -1,0 +1,1313 @@
+diff --git a/xla/backends/gpu/tests/BUILD b/xla/backends/gpu/tests/BUILD
+index f440975968..84c9b228bc 100644
+--- a/xla/backends/gpu/tests/BUILD
++++ b/xla/backends/gpu/tests/BUILD
+@@ -360,6 +360,19 @@ xla_test(
+     ],
+ )
+ 
++xla_test(
++    name = "temp_buffer_packing_test",
++    srcs = ["temp_buffer_packing_test.cc"],
++    backends = ["gpu"],
++    deps = [
++        ":gpu_pjrt_codegen_test",
++        "//xla:error_spec",
++        "//xla:xla_proto_cc",
++        "//xla/tests:hlo_interpreter_reference_mixin",
++        "@com_google_googletest//:gtest_main",
++    ],
++)
++
+ xla_test(
+     name = "gpu_copy_test",
+     srcs = ["gpu_copy_test.cc"],
+diff --git a/xla/backends/gpu/tests/temp_buffer_packing_test.cc b/xla/backends/gpu/tests/temp_buffer_packing_test.cc
+new file mode 100644
+index 0000000000..ced6e1cf58
+--- /dev/null
++++ b/xla/backends/gpu/tests/temp_buffer_packing_test.cc
+@@ -0,0 +1,102 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include <gtest/gtest.h>
++#include "xla/backends/gpu/tests/gpu_pjrt_codegen_test.h"
++#include "xla/error_spec.h"
++#include "xla/tests/hlo_interpreter_reference_mixin.h"
++#include "xla/xla.pb.h"
++
++namespace xla::gpu {
++namespace {
++
++class TempBufferPackingTest
++    : public HloInterpreterReferenceMixin<GpuPjRtCodegenTest> {
++ public:
++  DebugOptions GetDebugOptionsForTest() const override {
++    DebugOptions options = HloInterpreterReferenceMixin<
++        GpuPjRtCodegenTest>::GetDebugOptionsForTest();
++    options.set_xla_gpu_enable_heap_simulator_packing_search(true);
++    return options;
++  }
++};
++
++TEST_F(TempBufferPackingTest, ReusesStorageAcrossScheduledPhases) {
++  // Explicit fusions and a fixed schedule keep four differently sized
++  // temporaries alive across successive phases. Execute the assigned offsets
++  // on one GPU and compare both outputs with the interpreter.
++  constexpr char hlo[] = R"(
++HloModule packing, is_scheduled=true
++
++negate_b {
++  p = f32[256]{0} parameter(0)
++  ROOT b = f32[256]{0} negate(p)
++}
++abs_c {
++  p = f32[320]{0} parameter(0)
++  ROOT c = f32[320]{0} abs(p)
++}
++add {
++  x = f32[] parameter(0)
++  y = f32[] parameter(1)
++  ROOT sum = f32[] add(x, y)
++}
++reduce_320 {
++  p = f32[320]{0} parameter(0)
++  zero = f32[] constant(0)
++  ROOT r = f32[] reduce(p, zero), dimensions={0}, to_apply=add
++}
++reduce_d {
++  p = f32[320]{0} parameter(0)
++  zero = f32[] constant(0)
++  ROOT r = f32[] reduce(p, zero), dimensions={0}, to_apply=add
++}
++reduce_256 {
++  p = f32[256]{0} parameter(0)
++  zero = f32[] constant(0)
++  ROOT r = f32[] reduce(p, zero), dimensions={0}, to_apply=add
++}
++reduce_192 {
++  p = f32[192]{0} parameter(0)
++  zero = f32[] constant(0)
++  ROOT r = f32[] reduce(p, zero), dimensions={0}, to_apply=add
++}
++broadcast_a {
++  p = f32[] parameter(0)
++  ROOT a = f32[192]{0} broadcast(p), dimensions={}
++}
++broadcast_d {
++  p = f32[] parameter(0)
++  ROOT d = f32[320]{0} broadcast(p), dimensions={}
++}
++ENTRY main {
++  p0 = f32[256]{0} parameter(0)
++  p1 = f32[320]{0} parameter(1)
++  b = f32[256]{0} fusion(p0), kind=kLoop, calls=negate_b
++  c = f32[320]{0} fusion(p1), kind=kLoop, calls=abs_c
++  use_c = f32[] fusion(c), kind=kInput, calls=reduce_320
++  a = f32[192]{0} fusion(use_c), kind=kLoop, calls=broadcast_a
++  use_b = f32[] fusion(b), kind=kInput, calls=reduce_256
++  d = f32[320]{0} fusion(use_b), kind=kLoop, calls=broadcast_d
++  use_a = f32[] fusion(a), kind=kInput, calls=reduce_192
++  use_d = f32[] fusion(d), kind=kInput, calls=reduce_d
++  ROOT result = (f32[], f32[]) tuple(use_a, use_d)
++}
++)";
++  EXPECT_TRUE(RunAndCompareNoHloPasses(hlo, ErrorSpec{1e-3, 1e-5}));
++}
++
++}  // namespace
++}  // namespace xla::gpu
+diff --git a/xla/debug_options_flags.cc b/xla/debug_options_flags.cc
+index 9f75f6cee5..4eda973ce8 100644
+--- a/xla/debug_options_flags.cc
++++ b/xla/debug_options_flags.cc
+@@ -373,6 +373,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
+   opts.set_xla_gpu_nccl_init_max_rank_per_root_ratio(0);
+ 
+   opts.set_xla_gpu_temp_buffer_use_separate_color(false);
++  opts.set_xla_gpu_enable_heap_simulator_packing_search(false);
+   opts.set_xla_gpu_require_exclusive_lock(false);
+ 
+   opts.set_xla_gpu_redzone_padding_bytes(8 * 1024 * 1024);
+@@ -2481,6 +2482,15 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
+       "separate cuda async memory allocator to allocate temp buffer, this will "
+       "allocate temp buffer to the fixed address on every iteration"));
+ 
++  flag_list->push_back(tsl::Flag(
++      "xla_gpu_enable_heap_simulator_packing_search",
++      bool_setter_for(
++          &DebugOptions::set_xla_gpu_enable_heap_simulator_packing_search),
++      debug_options->xla_gpu_enable_heap_simulator_packing_search(),
++      "Try six deterministic placements of ordinary temporary buffers and "
++      "keep the smallest heap. Preserves the schedule and buffer lifetimes, "
++      "but may increase compilation time."));
++
+   flag_list->push_back(tsl::Flag(
+       "xla_gpu_require_exclusive_lock",
+       bool_setter_for(&DebugOptions::set_xla_gpu_require_exclusive_lock),
+diff --git a/xla/service/buffer_assignment.cc b/xla/service/buffer_assignment.cc
+index b1e4022413..2bfa567ffc 100644
+--- a/xla/service/buffer_assignment.cc
++++ b/xla/service/buffer_assignment.cc
+@@ -3173,6 +3173,19 @@ absl::Status BufferAssigner::AssignBuffersWithSequentialOrdering(
+     }
+     using HeapType = GlobalDecreasingSizeBestFitHeap<HloValue>;
+ 
++    // Optimize only the default color: changing a collective heap could change
++    // how much space a later color reuses in it, increasing the final total.
++    if (opts_.enable_heap_simulator_packing_search &&
++        color == LogicalBuffer::Color(0) &&
++        assignment->multiheap_size_constraint_per_heap() == UINT64_MAX &&
++        (buffer_assignment_algorithm ==
++             buffer_assignment::BufferAssignmentAlgorithmProto::DEFAULT ||
++         buffer_assignment_algorithm ==
++             buffer_assignment::BufferAssignmentAlgorithmProto::
++                 BEST_OF_SPATIAL_TEMPORAL)) {
++      return CreateHeapWithPackingSearch(alignment);
++    }
++
+     auto build_algorithm =
+         [alignment, assignment](
+             buffer_assignment::BufferAssignmentAlgorithmProto::Value algo)
+diff --git a/xla/service/buffer_assignment.h b/xla/service/buffer_assignment.h
+index 72ac832d24..45c77ca3fc 100644
+--- a/xla/service/buffer_assignment.h
++++ b/xla/service/buffer_assignment.h
+@@ -957,6 +957,11 @@ class BufferAssigner {
+ 
+     GlobalDecreasingSizeBestFitHeap<HloValue>::BufferIntervalCompare
+         heap_buffer_interval_compare;
++
++    // Try additional placements for unconstrained default-color temporary
++    // heaps when using the default spatial/temporal algorithm. Custom ordering,
++    // paged heaps and explicitly selected algorithms keep their behavior.
++    bool enable_heap_simulator_packing_search = false;
+     // The packing strategy to use for multi-page (page_size > 0) heap
+     // allocation.
+     GlobalDecreasingSizeBestFitHeap<HloValue>::PackingStrategy
+diff --git a/xla/service/buffer_assignment_test.cc b/xla/service/buffer_assignment_test.cc
+index bba5c535cd..957807db3f 100644
+--- a/xla/service/buffer_assignment_test.cc
++++ b/xla/service/buffer_assignment_test.cc
+@@ -498,6 +498,55 @@ static bool BuffersDistinct(const std::vector<const HloInstruction*>& a,
+ }
+ 
+ // Tests a computation consisting of a single scalar constant node.
++TEST_F(BufferAssignmentTest, PackingSearchPreservesScheduleAndReducesHeap) {
++  constexpr absl::string_view hlo = R"(
++HloModule packing, is_scheduled=true
++
++ENTRY main {
++  b = f32[4] custom-call(), custom_call_target="b", custom_call_has_side_effect=true
++  c = f32[5] custom-call(), custom_call_target="c", custom_call_has_side_effect=true
++  use_c = () custom-call(c), custom_call_target="consume", custom_call_has_side_effect=true
++  a = f32[3] custom-call(), custom_call_target="a", custom_call_has_side_effect=true
++  use_b = () custom-call(b), custom_call_target="consume", custom_call_has_side_effect=true
++  d = f32[5] custom-call(), custom_call_target="d", custom_call_has_side_effect=true
++  use_a = () custom-call(a), custom_call_target="consume", custom_call_has_side_effect=true
++  use_d = () custom-call(d), custom_call_target="consume", custom_call_has_side_effect=true
++  ROOT result = () tuple()
++}
++)";
++  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
++                       ParseAndReturnVerifiedModule(hlo));
++  const std::string original_module = module->ToString();
++  std::unique_ptr<BufferAssignment> baseline =
++      RunBufferAssignmentWithSequentialOrdering(module.get());
++  BufferAssigner::Options opts;
++  opts.allocate_buffers_for_constants = true;
++  opts.enable_heap_simulator_packing_search = true;
++  ASSERT_OK_AND_ASSIGN(
++      std::unique_ptr<BufferAssignment> packed,
++      BufferAssigner::Run(
++          module.get(),
++          std::make_unique<SequentialHloOrdering>(module->schedule()),
++          &BufferSizeBytes, &alias_info_,
++          [](LogicalBuffer::Color) { return 1; }, std::move(opts)));
++  EXPECT_EQ(module->ToString(), original_module);
++  EXPECT_EQ(baseline->temp_allocation_total_size(), 48);
++  EXPECT_EQ(packed->temp_allocation_total_size(), 36);
++  std::vector<std::string> baseline_traces;
++  std::vector<std::string> packed_traces;
++  for (const BufferAllocation& allocation : baseline->Allocations()) {
++    for (const HeapSimulatorTrace& trace : allocation.HeapTraces()) {
++      baseline_traces.push_back(trace.SerializeAsString());
++    }
++  }
++  for (const BufferAllocation& allocation : packed->Allocations()) {
++    for (const HeapSimulatorTrace& trace : allocation.HeapTraces()) {
++      packed_traces.push_back(trace.SerializeAsString());
++    }
++  }
++  EXPECT_EQ(packed_traces, baseline_traces);
++}
++
+ TEST_F(BufferAssignmentTest, ScalarConstant) {
+   auto builder = HloComputation::Builder(TestName());
+   auto const0 = builder.AddInstruction(
+diff --git a/xla/service/gpu/compile_module_to_llvm_ir.cc b/xla/service/gpu/compile_module_to_llvm_ir.cc
+index 36df696e0d..3ee8cf24bb 100644
+--- a/xla/service/gpu/compile_module_to_llvm_ir.cc
++++ b/xla/service/gpu/compile_module_to_llvm_ir.cc
+@@ -174,6 +174,8 @@ absl::StatusOr<std::unique_ptr<BufferAssignment>> RunBufferAssignment(
+   opts.allocate_buffers_for_constants = true;
+   opts.colorer = CreateColorer(options);
+   opts.temp_buffer_color = color;
++  opts.enable_heap_simulator_packing_search =
++      options.xla_gpu_enable_heap_simulator_packing_search();
+ 
+   // Allow S(0) buffers to reuse S(1) temp allocations. S(1) allocations
+   // satisfy stricter alignment and symmetric-offset requirements, so they are
+diff --git a/xla/service/heap_simulator/BUILD b/xla/service/heap_simulator/BUILD
+index 12297e08a3..aadd60176f 100644
+--- a/xla/service/heap_simulator/BUILD
++++ b/xla/service/heap_simulator/BUILD
+@@ -83,6 +83,7 @@ cc_library(
+         "@com_google_absl//absl/log:check",
+         "@com_google_absl//absl/log:vlog_is_on",
+         "@com_google_absl//absl/numeric:bits",
++        "@com_google_absl//absl/numeric:int128",
+         "@com_google_absl//absl/status",
+         "@com_google_absl//absl/status:status_macros",
+         "@com_google_absl//absl/status:statusor",
+diff --git a/xla/service/heap_simulator/heap_simulator.cc b/xla/service/heap_simulator/heap_simulator.cc
+index 8157e2605d..c848918fdc 100644
+--- a/xla/service/heap_simulator/heap_simulator.cc
++++ b/xla/service/heap_simulator/heap_simulator.cc
+@@ -44,6 +44,7 @@ limitations under the License.
+ #include "absl/log/log.h"
+ #include "absl/log/vlog_is_on.h"
+ #include "absl/numeric/bits.h"
++#include "absl/numeric/int128.h"
+ #include "absl/status/status.h"
+ #include "absl/status/status_macros.h"
+ #include "absl/strings/str_cat.h"
+@@ -686,8 +687,11 @@ template <typename BufferType>
+ GlobalDecreasingSizeBestFitHeap<BufferType>::GlobalDecreasingSizeBestFitHeap(
+     int64_t alignment, PackingStrategy packing_strategy,
+     BufferIntervalCompare buffer_interval_compare,
+-    SliceTimePermutationIterator::Ty slice_time_permutation_iterator_type)
++    SliceTimePermutationIterator::Ty slice_time_permutation_iterator_type,
++    ChunkPlacement chunk_placement)
+     : alignment_(alignment),
++      sort_by_area_(packing_strategy == kSpatialTemporal),
++      chunk_placement_(chunk_placement),
+       slice_time_permutation_iteration_type_(
+           slice_time_permutation_iterator_type) {
+   CHECK_GT(alignment, 0) << "Alignment (" << alignment << ") must be positive.";
+@@ -697,6 +701,20 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::GlobalDecreasingSizeBestFitHeap(
+   } else if (packing_strategy == kSpatial) {
+     buffer_interval_compare_ = GetSpatialBufferIntervalCompare();
+     CHECK(buffer_interval_compare == nullptr);
++  } else if (packing_strategy == kSpatialTemporal) {
++    buffer_interval_compare_ = [](const BufferInterval& lhs,
++                                  const BufferInterval& rhs) {
++      // A large buffer times a long schedule can overflow int64_t.
++      const absl::uint128 lhs_area =
++          absl::uint128(lhs.colocation_size) * lhs.colocation_live_duration;
++      const absl::uint128 rhs_area =
++          absl::uint128(rhs.colocation_size) * rhs.colocation_live_duration;
++      if (lhs_area != rhs_area) {
++        return lhs_area > rhs_area;
++      }
++      return *lhs.buffer < *rhs.buffer;
++    };
++    CHECK(buffer_interval_compare == nullptr);
+   } else if (packing_strategy == kFastMerge) {
+     buffer_interval_compare_ = GetColocationStartTimeBufferIntervalCompare();
+     CHECK(buffer_interval_compare == nullptr);
+@@ -2594,6 +2612,11 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::GetSortedBufferIntervals() const {
+   for (BufferInterval& interval : sorted_buffer_intervals) {
+     interval.min_colocation_start_time = interval.start;
+     interval.max_colocation_end_time = interval.end;
++    std::vector<std::pair<int64_t, int64_t>> live_intervals;
++    if (sort_by_area_) {
++      interval.colocation_size = interval.size;
++      live_intervals.emplace_back(interval.start, interval.end);
++    }
+     // TODO(vedernikova): Optimize this using a Union-Find algorithm updated
+     // during ShareWith() to incrementally track min/max times and sizes.
+     // Using a sorted container in the following cycle instead of the hash set
+@@ -2607,6 +2630,23 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::GetSortedBufferIntervals() const {
+           interval.min_colocation_start_time, colocated_interval.start);
+       interval.max_colocation_end_time =
+           std::max(interval.max_colocation_end_time, colocated_interval.end);
++      if (sort_by_area_) {
++        interval.colocation_size =
++            std::max(interval.colocation_size, colocated_interval.size);
++        live_intervals.emplace_back(colocated_interval.start,
++                                    colocated_interval.end);
++      }
++    }
++    if (sort_by_area_) {
++      // Keep gaps between aliases available for reuse, and count overlapping
++      // aliases once. The interval tree uses inclusive temporal endpoints.
++      absl::c_sort(live_intervals);
++      int64_t previous_end = -1;
++      for (const auto& [start, end] : live_intervals) {
++        interval.colocation_live_duration +=
++            std::max(int64_t{0}, end - std::max(start - 1, previous_end));
++        previous_end = std::max(previous_end, end);
++      }
+     }
+   }
+ 
+@@ -2821,6 +2861,9 @@ GlobalDecreasingSizeBestFitHeap<BufferType>::FindUnslicedChunkCandidates(
+       if (free_chunk.second - max_colocation_size < aligned_start) {
+         continue;
+       }
++      if (chunk_placement_ == ChunkPlacement::kLowestOffset) {
++        return aligned_start;
++      }
+       int64_t size = free_chunk.second - free_chunk.first;
+       // Note: best_offset < 0 must be checked explicitly because the final
+       // free chunk extends to INT64_MAX, so its size can equal the best_size
+@@ -2957,6 +3000,7 @@ ConstrainedGlobalDecreasingSizeBestFitHeap::Finish() {
+   switch (packing_strategy_) {
+     case kSpatial:
+     case kTemporal:
++    case kSpatialTemporal:
+     case kCustom:
+     case kPhaseWindow:
+     case kPhaseWindowEnd:
+@@ -3240,6 +3284,8 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
+   int min_size_index = -1;
+   for (int i = 0; i < algorithms_.size(); ++i) {
+     ABSL_ASSIGN_OR_RETURN(results[i], algorithms_[i]->Finish());
++    VLOG(1) << "Heap placement candidate " << i << ": " << results[i].heap_size
++            << " bytes";
+     if (results[i].heap_size < min_size) {
+       min_size = results[i].heap_size;
+       min_size_index = i;
+@@ -3250,6 +3296,25 @@ ChooseBestHeapAlgorithm<BufferType>::Finish() {
+   return results[min_size_index];
+ }
+ 
++std::unique_ptr<HeapAlgorithm<HloValue>> CreateHeapWithPackingSearch(
++    int64_t alignment) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  auto algorithms =
++      std::make_unique<std::vector<std::unique_ptr<HeapAlgorithm<HloValue>>>>();
++  for (Heap::ChunkPlacement placement :
++       {Heap::ChunkPlacement::kBestFit, Heap::ChunkPlacement::kLowestOffset}) {
++    for (Heap::PackingStrategy strategy :
++         {Heap::kSpatial, Heap::kTemporal, Heap::kSpatialTemporal}) {
++      algorithms->push_back(
++          std::make_unique<ConstrainedGlobalDecreasingSizeBestFitHeap>(
++              std::numeric_limits<uint64_t>::max(), alignment, strategy,
++              nullptr, placement));
++    }
++  }
++  return std::make_unique<ChooseBestHeapAlgorithm<HloValue>>(
++      std::move(algorithms));
++}
++
+ BreadthFirstMidpointIterator::BreadthFirstMidpointIterator(int start, int end)
+     : initial_work_item_({start, end}) {
+   Begin();
+diff --git a/xla/service/heap_simulator/heap_simulator.h b/xla/service/heap_simulator/heap_simulator.h
+index 12e419e14e..1714bd9f81 100644
+--- a/xla/service/heap_simulator/heap_simulator.h
++++ b/xla/service/heap_simulator/heap_simulator.h
+@@ -604,9 +604,15 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
+     // Like kPhaseWindow but orders by END time, grouping buffers that expire
+     // together onto the same page so whole pages become dead at once (which the
+     // pager can then evict or discard cheaply).
+-    kPhaseWindowEnd
++    kPhaseWindowEnd,
++    // Sort by size times the duration of the union of colocated live ranges.
++    kSpatialTemporal
+   };
+ 
++  // Selection of a free chunk for an unsliced allocation. Sliced allocations
++  // continue to use the sliced allocation finder.
++  enum class ChunkPlacement { kBestFit, kLowestOffset };
++
+   // BufferInterval stores a buffer's size and time interval.
+   struct BufferInterval {
+     // Convenience method for use with debugging and logging.
+@@ -630,6 +636,8 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
+     // sorting.
+     int64_t min_colocation_start_time = -1;
+     int64_t max_colocation_end_time = -1;
++    int64_t colocation_size = 0;
++    int64_t colocation_live_duration = 0;
+   };
+ 
+   // Comparison function that is used to store buffer intervals.
+@@ -918,7 +926,8 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
+       int64_t alignment, PackingStrategy type = kSpatial,
+       BufferIntervalCompare buffer_interval_compare = nullptr,
+       SliceTimePermutationIterator::Ty slice_time_permutation_iterator_type =
+-          SliceTimePermutationIterator::Ty::kAll);
++          SliceTimePermutationIterator::Ty::kAll,
++      ChunkPlacement chunk_placement = ChunkPlacement::kBestFit);
+   ~GlobalDecreasingSizeBestFitHeap() override {}
+ 
+   void Alloc(const BufferType* buffer, int64_t size) override;
+@@ -1070,6 +1079,9 @@ class GlobalDecreasingSizeBestFitHeap : public HeapAlgorithm<BufferType> {
+ 
+   int64_t alignment_;
+ 
++  const bool sort_by_area_;
++  const ChunkPlacement chunk_placement_;
++
+   // The current time represented as an integer. It increments by 1 at each
+   // Alloc or Free call.
+   int64_t current_time_ = 0;
+@@ -1122,9 +1134,11 @@ class ConstrainedGlobalDecreasingSizeBestFitHeap
+   explicit ConstrainedGlobalDecreasingSizeBestFitHeap(
+       uint64_t size_limit_per_heap, int64_t alignment,
+       PackingStrategy packing_strategy = kSpatial,
+-      BufferIntervalCompare buffer_interval_compare = nullptr)
+-      : GlobalDecreasingSizeBestFitHeap<HloValue>(alignment, packing_strategy,
+-                                                  buffer_interval_compare),
++      BufferIntervalCompare buffer_interval_compare = nullptr,
++      ChunkPlacement chunk_placement = ChunkPlacement::kBestFit)
++      : GlobalDecreasingSizeBestFitHeap<HloValue>(
++            alignment, packing_strategy, buffer_interval_compare,
++            SliceTimePermutationIterator::Ty::kAll, chunk_placement),
+         size_limit_per_heap_(size_limit_per_heap),
+         packing_strategy_(packing_strategy) {}
+   ~ConstrainedGlobalDecreasingSizeBestFitHeap() override {}
+@@ -1196,6 +1210,12 @@ class ChooseBestHeapAlgorithm : public HeapAlgorithm<BufferType> {
+   std::vector<std::unique_ptr<HeapAlgorithm<BufferType>>> algorithms_;
+ };
+ 
++// Tries six deterministic placements for an unconstrained heap. The existing
++// spatial and temporal best-fit algorithms are the first two candidates, so
++// equal-size results preserve the baseline placement.
++std::unique_ptr<HeapAlgorithm<HloValue>> CreateHeapWithPackingSearch(
++    int64_t alignment);
++
+ // A heap algorithm that runs a primary algorithm, and if it results in OOM or
+ // exceeds a provided memory limit, safely runs a fallback algorithm instead
+ // using lazy replay.
+diff --git a/xla/service/heap_simulator/heap_simulator_test.cc b/xla/service/heap_simulator/heap_simulator_test.cc
+index 1fc11b0d65..0e5f0508cf 100644
+--- a/xla/service/heap_simulator/heap_simulator_test.cc
++++ b/xla/service/heap_simulator/heap_simulator_test.cc
+@@ -15,6 +15,7 @@ limitations under the License.
+ 
+ #include "xla/service/heap_simulator/heap_simulator.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <functional>
+ #include <limits>
+@@ -1109,6 +1110,232 @@ TEST_F(NoFragmentationStatsHeapTest, Mixed) {
+ 
+ class GlobalDecreasingSizeBestFitHeapTest : public HeapAlgorithmTestBase {};
+ 
++class HeapPackingSearchTest : public HeapAlgorithmTestBase {};
++
++TEST_F(HeapPackingSearchTest, ImprovesBothExistingStrategies) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  for (int64_t alignment : {1, 16}) {
++    Heap spatial(alignment, Heap::kSpatial);
++    Heap temporal(alignment, Heap::kTemporal);
++    std::unique_ptr<HeapAlgorithm<HloValue>> search =
++        CreateHeapWithPackingSearch(alignment);
++    for (HeapAlgorithm<HloValue>* heap :
++         {static_cast<HeapAlgorithm<HloValue>*>(&spatial),
++          static_cast<HeapAlgorithm<HloValue>*>(&temporal), search.get()}) {
++      // B and C need 9 units together. Later A and D need 8. Both existing
++      // greedy orders use 12; size times lifetime finds a 9-unit placement.
++      heap->Alloc(buffer_b_, 4 * alignment);
++      heap->Alloc(buffer_c_, 5 * alignment);
++      heap->Free(buffer_c_, 5 * alignment);
++      heap->Alloc(buffer_a_, 3 * alignment);
++      heap->Free(buffer_b_, 4 * alignment);
++      heap->Alloc(buffer_d_, 5 * alignment);
++      heap->Free(buffer_a_, 3 * alignment);
++      heap->Free(buffer_d_, 5 * alignment);
++    }
++    ASSERT_OK_AND_ASSIGN(const auto spatial_result, spatial.Finish());
++    ASSERT_OK_AND_ASSIGN(const auto temporal_result, temporal.Finish());
++    ASSERT_OK_AND_ASSIGN(const auto result, search->Finish());
++    EXPECT_EQ(spatial_result.heap_size, 12 * alignment);
++    EXPECT_EQ(temporal_result.heap_size, 12 * alignment);
++    EXPECT_EQ(result.heap_size, 9 * alignment);
++    ASSERT_EQ(result.heap_results.size(), 1);
++    for (const auto& [buffer, chunk] : result.heap_results[0].chunk_map) {
++      EXPECT_EQ(chunk.offset % alignment, 0);
++    }
++  }
++}
++
++TEST_F(HeapPackingSearchTest, PreservesBaselineOnTie) {
++  GlobalDecreasingSizeBestFitHeap<HloValue> baseline(1);
++  std::unique_ptr<HeapAlgorithm<HloValue>> search =
++      CreateHeapWithPackingSearch(1);
++  for (HeapAlgorithm<HloValue>* heap :
++       {static_cast<HeapAlgorithm<HloValue>*>(&baseline), search.get()}) {
++    heap->Alloc(buffer_a_, 4);
++    heap->Alloc(buffer_b_, 4);
++    heap->Free(buffer_a_, 4);
++    heap->Alloc(buffer_c_, 6);
++    heap->Free(buffer_b_, 4);
++    heap->Free(buffer_c_, 6);
++  }
++  ASSERT_OK_AND_ASSIGN(const auto expected, baseline.Finish());
++  ASSERT_OK_AND_ASSIGN(const auto result, search->Finish());
++  EXPECT_EQ(result.heap_size, 10);
++  EXPECT_THAT(result.heap_results[0].chunk_map,
++              ContainerEq(expected.heap_results[0].chunk_map));
++}
++
++TEST_F(HeapPackingSearchTest, ColocationGapsAndDifferentSizes) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  for (Heap::ChunkPlacement placement :
++       {Heap::ChunkPlacement::kBestFit, Heap::ChunkPlacement::kLowestOffset}) {
++    Heap heap(4, Heap::kSpatialTemporal, nullptr,
++              SliceTimePermutationIterator::Ty::kAll, placement);
++    heap.Alloc(buffer_a_, 4);
++    heap.Free(buffer_a_, 4);
++    heap.Alloc(buffer_b_, 9);
++    heap.Free(buffer_b_, 9);
++    heap.ShareWith(buffer_c_, buffer_a_, 6);
++    heap.Free(buffer_c_, 6);
++    heap.Alloc(buffer_d_, 0);
++    heap.Free(buffer_d_, 0);
++    ASSERT_OK_AND_ASSIGN(const auto result, heap.Finish());
++    EXPECT_EQ(result.heap_size, 9);
++    const auto& chunks = result.heap_results[0].chunk_map;
++    EXPECT_EQ(chunks.at(buffer_a_), chunks.at(buffer_c_));
++    EXPECT_EQ(chunks.at(buffer_a_).size, 6);
++    EXPECT_EQ(chunks.at(buffer_b_).offset, 0);
++    EXPECT_EQ(chunks.at(buffer_d_).size, 0);
++  }
++}
++
++TEST_F(HeapPackingSearchTest, Empty) {
++  ASSERT_OK_AND_ASSIGN(const auto result,
++                       CreateHeapWithPackingSearch(16)->Finish());
++  EXPECT_EQ(result.heap_size, 0);
++  ASSERT_EQ(result.heap_results.size(), 1);
++  EXPECT_TRUE(result.heap_results[0].chunk_map.empty());
++}
++
++TEST_F(HeapPackingSearchTest, OverlappingAliasesAreCountedOnceForOrdering) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  Heap heap(1, Heap::kSpatialTemporal);
++  heap.Alloc(buffer_a_, 4);
++  heap.Alloc(buffer_b_, 7);
++  heap.ShareWith(buffer_c_, buffer_a_, 4);
++  heap.Free(buffer_a_, 4);
++  heap.Free(buffer_b_, 7);
++  heap.Free(buffer_c_, 4);
++  // The A/C union has area 4 * 6 = 24; B has area 7 * 4 = 28.
++  // Summing the two alias lifetimes would incorrectly give A/C area 32.
++  ASSERT_OK_AND_ASSIGN(const auto result, heap.Finish());
++  const auto& chunks = result.heap_results[0].chunk_map;
++  EXPECT_EQ(chunks.at(buffer_b_).offset, 0);
++  EXPECT_EQ(chunks.at(buffer_a_).offset, 7);
++  EXPECT_EQ(chunks.at(buffer_a_), chunks.at(buffer_c_));
++  EXPECT_EQ(result.heap_size, 11);
++}
++
++TEST_F(HeapPackingSearchTest, AreaComparisonDoesNotOverflowInt64) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  Heap heap(1, Heap::kSpatialTemporal);
++  const int64_t size = int64_t{1} << 60;
++  heap.Alloc(buffer_a_, size);
++  heap.Alloc(buffer_b_, size);
++  heap.Alloc(buffer_c_, 1);
++  heap.Free(buffer_c_, 1);
++  heap.Alloc(buffer_d_, 1);
++  heap.Free(buffer_d_, 1);
++  heap.Free(buffer_b_, size);
++  heap.Alloc(buffer_e_, 1);
++  heap.Free(buffer_e_, 1);
++  heap.Free(buffer_a_, size);
++  // A's area is 10 * 2^60, exceeding int64_t; B's area is 6 * 2^60.
++  ASSERT_OK_AND_ASSIGN(const auto result, heap.Finish());
++  EXPECT_EQ(result.heap_results[0].chunk_map.at(buffer_a_).offset, 0);
++  EXPECT_EQ(result.heap_results[0].chunk_map.at(buffer_b_).offset, size);
++}
++
++TEST_F(HeapPackingSearchTest, LowestOffsetCanImproveBestFit) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  Heap best_fit(1, Heap::kSpatial);
++  Heap lowest_offset(1, Heap::kSpatial, nullptr,
++                     SliceTimePermutationIterator::Ty::kAll,
++                     Heap::ChunkPlacement::kLowestOffset);
++  for (HeapAlgorithm<HloValue>* heap :
++       {static_cast<HeapAlgorithm<HloValue>*>(&best_fit),
++        static_cast<HeapAlgorithm<HloValue>*>(&lowest_offset)}) {
++    heap->Alloc(buffer_h_, 2);
++    heap->Alloc(buffer_b_, 5);
++    heap->Alloc(buffer_c_, 1);
++    heap->Alloc(buffer_f_, 2);
++    heap->Alloc(buffer_g_, 4);
++    heap->Free(buffer_f_, 2);
++    heap->Alloc(buffer_a_, 1);
++    heap->Free(buffer_b_, 5);
++    heap->Free(buffer_a_, 1);
++    heap->Alloc(buffer_d_, 12);
++    heap->Free(buffer_c_, 1);
++    heap->Free(buffer_g_, 4);
++    heap->Alloc(buffer_e_, 6);
++    heap->Free(buffer_e_, 6);
++    heap->Free(buffer_h_, 2);
++    heap->Free(buffer_d_, 12);
++  }
++  ASSERT_OK_AND_ASSIGN(const auto baseline, best_fit.Finish());
++  ASSERT_OK_AND_ASSIGN(const auto result, lowest_offset.Finish());
++  EXPECT_EQ(baseline.heap_size, 21);
++  EXPECT_EQ(result.heap_size, 20);
++}
++
++TEST_F(HeapPackingSearchTest, RandomIntervalsStayDisjointAndNeverRegress) {
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  const std::vector<const HloValue*> buffers = {
++      buffer_a_, buffer_b_, buffer_c_, buffer_d_, buffer_e_,
++      buffer_f_, buffer_g_, buffer_h_, buffer_i_};
++  std::mt19937 generator(6811592);
++  for (int trial = 0; trial < 100; ++trial) {
++    const int64_t alignment = trial % 2 == 0 ? 1 : 16;
++    std::vector<int> events(2 * buffers.size());
++    for (int i = 0; i < events.size(); ++i) {
++      events[i] = i;
++    }
++    std::shuffle(events.begin(), events.end(), generator);
++    std::vector<int64_t> sizes(buffers.size());
++    std::vector<int> starts(buffers.size(), -1);
++    std::vector<int> ends(buffers.size(), -1);
++    Heap spatial(alignment, Heap::kSpatial);
++    Heap temporal(alignment, Heap::kTemporal);
++    std::unique_ptr<HeapAlgorithm<HloValue>> search =
++        CreateHeapWithPackingSearch(alignment);
++    std::unique_ptr<HeapAlgorithm<HloValue>> repeat =
++        CreateHeapWithPackingSearch(alignment);
++    for (int t = 0; t < events.size(); ++t) {
++      const int i = events[t] / 2;
++      const bool allocate = starts[i] < 0;
++      if (allocate) {
++        starts[i] = t;
++        sizes[i] = 1 + generator() % 100;
++      } else {
++        ends[i] = t;
++      }
++      for (HeapAlgorithm<HloValue>* heap :
++           {static_cast<HeapAlgorithm<HloValue>*>(&spatial),
++            static_cast<HeapAlgorithm<HloValue>*>(&temporal), search.get(),
++            repeat.get()}) {
++        if (allocate) {
++          heap->Alloc(buffers[i], sizes[i]);
++        } else {
++          heap->Free(buffers[i], sizes[i]);
++        }
++      }
++    }
++    ASSERT_OK_AND_ASSIGN(const auto spatial_result, spatial.Finish());
++    ASSERT_OK_AND_ASSIGN(const auto temporal_result, temporal.Finish());
++    ASSERT_OK_AND_ASSIGN(const auto result, search->Finish());
++    ASSERT_OK_AND_ASSIGN(const auto repeated_result, repeat->Finish());
++    EXPECT_LE(result.heap_size,
++              std::min(spatial_result.heap_size, temporal_result.heap_size));
++    const auto& chunks = result.heap_results[0].chunk_map;
++    EXPECT_THAT(chunks, ContainerEq(repeated_result.heap_results[0].chunk_map));
++    ASSERT_EQ(chunks.size(), buffers.size());
++    for (int i = 0; i < buffers.size(); ++i) {
++      const auto& a = chunks.at(buffers[i]);
++      EXPECT_EQ(a.offset % alignment, 0);
++      EXPECT_GE(a.offset, 0);
++      EXPECT_EQ(a.size, sizes[i]);
++      EXPECT_LE(a.chunk_end(), result.heap_size);
++      for (int j = 0; j < i; ++j) {
++        if (starts[i] <= ends[j] && starts[j] <= ends[i]) {
++          const auto& b = chunks.at(buffers[j]);
++          EXPECT_TRUE(a.chunk_end() <= b.offset || b.chunk_end() <= a.offset);
++        }
++      }
++    }
++  }
++}
++
+ TEST_F(GlobalDecreasingSizeBestFitHeapTest, Empty) {
+   GlobalDecreasingSizeBestFitHeap<HloValue> heap(/*alignment=*/1);
+   ASSERT_OK_AND_ASSIGN(const HeapSimulator::Result<HloValue> result,
+diff --git a/xla/tools/BUILD b/xla/tools/BUILD
+index 43b7aa8ca7..847ca69b77 100644
+--- a/xla/tools/BUILD
++++ b/xla/tools/BUILD
+@@ -68,6 +68,46 @@ filegroup(
+ # XLA command line tools
+ #===------------------------------------------------------------------------===#
+ 
++xla_cc_binary(
++    name = "heap_simulator_replay",
++    srcs = ["heap_simulator_replay_main.cc"],
++    deps = [
++        ":heap_simulator_replay_lib",
++        "//xla/service:hlo_proto_cc",
++        "//xla/tsl/platform:env",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/strings",
++    ],
++)
++
++cc_library(
++    name = "heap_simulator_replay_lib",
++    srcs = ["heap_simulator_replay.cc"],
++    hdrs = ["heap_simulator_replay.h"],
++    deps = [
++        "//xla:shape_util",
++        "//xla:xla_data_proto_cc",
++        "//xla/hlo/ir:hlo",
++        "//xla/service:hlo_proto_cc",
++        "//xla/service:hlo_value",
++        "//xla/service/heap_simulator:heap_simulator",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:status_macros",
++    ],
++)
++
++xla_cc_test(
++    name = "heap_simulator_replay_test",
++    srcs = ["heap_simulator_replay_test.cc"],
++    deps = [
++        ":heap_simulator_replay_lib",
++        "//xla/service:hlo_proto_cc",
++        "//xla/tests:xla_internal_test_main",  # fixdeps: keep
++        "@com_google_absl//absl/status",
++        "@com_google_googletest//:gtest",
++    ],
++)
++
+ xla_cc_binary(
+     name = "hlo-extractor",
+     testonly = True,
+diff --git a/xla/tools/heap_simulator_replay.cc b/xla/tools/heap_simulator_replay.cc
+new file mode 100644
+index 0000000000..4affa51ee3
+--- /dev/null
++++ b/xla/tools/heap_simulator_replay.cc
+@@ -0,0 +1,218 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++// Replays the traced heap in the largest ordinary temporary allocation in an
++// HloProto produced by --xla_dump_hlo_as_proto=true. An appended untraced
++// suffix (e.g. tuple buffers) is reported separately. Does not compile or
++// reschedule. Usage: heap_simulator_replay module.hlo.pb [alignment_bytes]
++
++#include "xla/tools/heap_simulator_replay.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <iomanip>
++#include <ios>
++#include <map>
++#include <memory>
++#include <ostream>
++#include <ratio>
++#include <set>
++
++#include "absl/status/status.h"
++#include "absl/status/status_macros.h"
++#include "xla/hlo/ir/hlo_instruction.h"
++#include "xla/service/heap_simulator/heap_simulator.h"
++#include "xla/service/hlo.pb.h"
++#include "xla/service/hlo_value.h"
++#include "xla/shape_util.h"
++#include "xla/xla_data.pb.h"
++
++namespace xla {
++
++absl::Status ReplayHeapSimulator(const HloProto& proto, int64_t alignment,
++                                 std::ostream& output) {
++  if (alignment <= 0) {
++    return absl::InvalidArgumentError("Alignment must be positive");
++  }
++  const BufferAssignmentProto& assignment = proto.buffer_assignment();
++  const BufferAllocationProto* allocation = nullptr;
++  for (const BufferAllocationProto& candidate :
++       assignment.buffer_allocations()) {
++    if (candidate.color() != 0 || candidate.is_entry_computation_parameter() ||
++        candidate.is_constant() || candidate.maybe_live_out() ||
++        candidate.is_thread_local()) {
++      continue;
++    }
++    if (allocation == nullptr || candidate.size() > allocation->size()) {
++      allocation = &candidate;
++    }
++  }
++  if (allocation == nullptr) {
++    return absl::InvalidArgumentError("No ordinary temporary allocation found");
++  }
++
++  // Only stable IDs are used by the placement algorithms. A scalar placeholder
++  // avoids constructing the module or materializing large constants. Sizes
++  // come from the assignment, including the maximum size of each alias group.
++  std::unique_ptr<HloInstruction> instruction = HloInstruction::CreateParameter(
++      0, ShapeUtil::MakeShape(U8, {}), "replay");
++  std::map<int64_t, std::unique_ptr<HloValue>> values;
++  std::map<int64_t, int64_t> sizes;
++  std::map<int64_t, int64_t> offsets;
++  for (const BufferAllocationProto::Assigned& assigned :
++       allocation->assigned()) {
++    if (assigned.size() < 0 || assigned.offset() < 0 ||
++        assigned.offset() > allocation->size() ||
++        assigned.size() > allocation->size() - assigned.offset()) {
++      return absl::InvalidArgumentError("Buffer outside allocation");
++    }
++    const int64_t id = assigned.logical_buffer_id();
++    if (values.find(id) != values.end()) {
++      return absl::InvalidArgumentError("Duplicate assigned buffer");
++    }
++    values[id] =
++        std::make_unique<HloValue>(id, instruction.get(), ShapeIndex{});
++    sizes[id] = assigned.size();
++    offsets[id] = assigned.offset();
++  }
++  // Match buffer IDs instead of buffer_allocation_index: older dumps can
++  // retain the index from before CombineTempAllocations renumbered allocations.
++  // Validate complete membership below, rejecting combined/constrained heaps.
++  const HeapSimulatorTrace* trace = nullptr;
++  for (const HeapSimulatorTrace& candidate :
++       assignment.heap_simulator_traces()) {
++    bool contains_buffer = false;
++    for (const HeapSimulatorTrace::Event& event : candidate.events()) {
++      if (values.find(event.buffer_id()) != values.end()) {
++        contains_buffer = true;
++        break;
++      }
++    }
++    if (!contains_buffer) {
++      continue;
++    }
++    if (trace != nullptr) {
++      return absl::InvalidArgumentError(
++          "Expected one trace; combined per-computation heaps are unsupported");
++    }
++    trace = &candidate;
++  }
++  if (trace == nullptr) {
++    return absl::InvalidArgumentError("Allocation has no heap simulator trace");
++  }
++  std::set<int64_t> seen;
++  std::set<int64_t> live;
++  for (const HeapSimulatorTrace::Event& event : trace->events()) {
++    const int64_t id = event.buffer_id();
++    if (values.find(id) == values.end()) {
++      return absl::InvalidArgumentError(
++          "Trace crosses allocation boundaries; constrained heaps are "
++          "unsupported");
++    }
++    if (event.kind() == HeapSimulatorTrace::Event::FREE) {
++      if (live.erase(id) != 1) {
++        return absl::InvalidArgumentError("FREE without a live buffer");
++      }
++    } else {
++      if (event.kind() != HeapSimulatorTrace::Event::ALLOC &&
++          event.kind() != HeapSimulatorTrace::Event::SHARE_WITH) {
++        return absl::InvalidArgumentError("Unknown heap event");
++      }
++      if (event.kind() == HeapSimulatorTrace::Event::SHARE_WITH &&
++          seen.find(event.share_with_canonical_id()) == seen.end()) {
++        return absl::InvalidArgumentError("Unknown canonical buffer");
++      }
++      if (!seen.insert(id).second) {
++        return absl::InvalidArgumentError("Buffer allocated more than once");
++      }
++      live.insert(id);
++    }
++  }
++  if (!live.empty()) {
++    return absl::InvalidArgumentError("Trace leaves live buffers");
++  }
++  int64_t traced_end = 0;
++  for (int64_t id : seen) {
++    traced_end = std::max(traced_end, offsets.at(id) + sizes.at(id));
++  }
++  // CombineTempAllocations can append allocations not handled by the heap
++  // simulator, such as tuple buffers. Replay only the traced heap; do not
++  // invent lifetimes for those buffers or include them in candidate sizes.
++  for (const auto& [id, offset] : offsets) {
++    if (seen.find(id) == seen.end() && sizes.at(id) > 0 &&
++        offset < traced_end) {
++      return absl::InvalidArgumentError(
++          "Untraced buffers overlap the traced heap; unsupported allocation");
++    }
++  }
++
++  output << "allocation=" << allocation->index()
++         << " recorded_bytes=" << allocation->size()
++         << " recorded_trace_bytes=" << traced_end
++         << " untraced_suffix_bytes=" << allocation->size() - traced_end
++         << " traced_buffers=" << seen.size()
++         << " assigned_buffers=" << values.size() << " alignment=" << alignment
++         << '\n';
++  output
++      << "| Order            | Placement     | Trace (bytes) | Time (ms) |\n"
++         "| ---------------- | ------------- | ------------- | --------- |\n";
++  using Heap = GlobalDecreasingSizeBestFitHeap<HloValue>;
++  for (Heap::ChunkPlacement placement :
++       {Heap::ChunkPlacement::kBestFit, Heap::ChunkPlacement::kLowestOffset}) {
++    for (Heap::PackingStrategy strategy :
++         {Heap::kSpatial, Heap::kTemporal, Heap::kSpatialTemporal}) {
++      const auto start = std::chrono::steady_clock::now();
++      Heap heap(alignment, strategy, nullptr,
++                SliceTimePermutationIterator::Ty::kAll, placement);
++      for (const HeapSimulatorTrace::Event& event : trace->events()) {
++        const HloValue* value = values.at(event.buffer_id()).get();
++        const int64_t size = sizes.at(event.buffer_id());
++        switch (event.kind()) {
++          case HeapSimulatorTrace::Event::ALLOC:
++            heap.Alloc(value, size);
++            break;
++          case HeapSimulatorTrace::Event::FREE:
++            heap.Free(value, size);
++            break;
++          case HeapSimulatorTrace::Event::SHARE_WITH:
++            heap.ShareWith(
++                value, values.at(event.share_with_canonical_id()).get(), size);
++            break;
++          default:
++            return absl::InvalidArgumentError("Unknown heap event");
++        }
++      }
++      ABSL_ASSIGN_OR_RETURN(const HeapSimulator::Result<HloValue> result,
++                            heap.Finish());
++      const double milliseconds = std::chrono::duration<double, std::milli>(
++                                      std::chrono::steady_clock::now() - start)
++                                      .count();
++      const char* order = strategy == Heap::kSpatial    ? "size"
++                          : strategy == Heap::kTemporal ? "lifetime"
++                                                        : "size x duration";
++      const char* policy = placement == Heap::ChunkPlacement::kBestFit
++                               ? "best fit"
++                               : "lowest offset";
++      output << "| " << std::left << std::setw(16) << order << " | "
++             << std::setw(13) << policy << " | " << std::right << std::setw(13)
++             << result.heap_size << " | " << std::setw(9) << std::fixed
++             << std::setprecision(2) << milliseconds << " |\n";
++    }
++  }
++  return absl::OkStatus();
++}
++
++}  // namespace xla
+diff --git a/xla/tools/heap_simulator_replay.h b/xla/tools/heap_simulator_replay.h
+new file mode 100644
+index 0000000000..b7e98d73dd
+--- /dev/null
++++ b/xla/tools/heap_simulator_replay.h
+@@ -0,0 +1,37 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_TOOLS_HEAP_SIMULATOR_REPLAY_H_
++#define XLA_TOOLS_HEAP_SIMULATOR_REPLAY_H_
++
++#include <cstdint>
++#include <iosfwd>
++
++#include "absl/status/status.h"
++
++namespace xla {
++
++class HloProto;
++
++// Prints six placement results for the traced heap in the largest ordinary
++// temporary allocation. Reports an appended untraced suffix separately, and
++// rejects allocations whose trace cannot be replayed as one unconstrained heap.
++// Does not mutate the proto or compile the module.
++absl::Status ReplayHeapSimulator(const HloProto& proto, int64_t alignment,
++                                 std::ostream& output);
++
++}  // namespace xla
++
++#endif  // XLA_TOOLS_HEAP_SIMULATOR_REPLAY_H_
+diff --git a/xla/tools/heap_simulator_replay_main.cc b/xla/tools/heap_simulator_replay_main.cc
+new file mode 100644
+index 0000000000..a8f2eb1eaa
+--- /dev/null
++++ b/xla/tools/heap_simulator_replay_main.cc
+@@ -0,0 +1,46 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++// Usage: heap_simulator_replay module.hlo.pb [alignment_bytes]
++
++#include <cstdint>
++#include <iostream>
++
++#include "absl/status/status.h"
++#include "absl/strings/numbers.h"
++#include "xla/service/hlo.pb.h"
++#include "xla/tools/heap_simulator_replay.h"
++#include "xla/tsl/platform/env.h"
++
++int main(int argc, char** argv) {
++  int64_t alignment = 256;
++  if (argc < 2 || argc > 3 ||
++      (argc == 3 && !absl::SimpleAtoi(argv[2], &alignment)) || alignment <= 0) {
++    std::cerr
++        << "Usage: heap_simulator_replay module.hlo.pb [alignment_bytes]\n";
++    return 1;
++  }
++  xla::HloProto proto;
++  absl::Status status =
++      tsl::ReadBinaryProto(tsl::Env::Default(), argv[1], &proto);
++  if (status.ok()) {
++    status = xla::ReplayHeapSimulator(proto, alignment, std::cout);
++  }
++  if (!status.ok()) {
++    std::cerr << status << '\n';
++    return 1;
++  }
++  return 0;
++}
+diff --git a/xla/tools/heap_simulator_replay_test.cc b/xla/tools/heap_simulator_replay_test.cc
+new file mode 100644
+index 0000000000..e72684237a
+--- /dev/null
++++ b/xla/tools/heap_simulator_replay_test.cc
+@@ -0,0 +1,176 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#include "xla/tools/heap_simulator_replay.h"
++
++#include <cstdint>
++#include <sstream>
++#include <string>
++
++#include <gmock/gmock.h>
++#include <gtest/gtest.h>
++#include "absl/status/status.h"
++#include "xla/service/hlo.pb.h"
++
++namespace xla {
++namespace {
++
++using ::testing::HasSubstr;
++
++void AddBuffer(BufferAllocationProto* allocation, int64_t id, int64_t offset,
++               int64_t size) {
++  auto* buffer = allocation->add_assigned();
++  buffer->set_logical_buffer_id(id);
++  buffer->set_offset(offset);
++  buffer->set_size(size);
++}
++
++void AddEvent(HeapSimulatorTrace* trace, HeapSimulatorTrace::Event::Kind kind,
++              int64_t id) {
++  auto* event = trace->add_events();
++  event->set_kind(kind);
++  event->set_buffer_id(id);
++}
++
++HloProto MakeProto() {
++  HloProto proto;
++  auto* assignment = proto.mutable_buffer_assignment();
++  auto* allocation = assignment->add_buffer_allocations();
++  allocation->set_index(7);
++  allocation->set_size(7);
++  AddBuffer(allocation, 10, 0, 4);
++  // CombineTempAllocations appends an untraced allocation after the heap.
++  AddBuffer(allocation, 11, 4, 3);
++  auto* trace = assignment->add_heap_simulator_traces();
++  // A dump can retain the old index after allocations are renumbered.
++  trace->set_buffer_allocation_index(3);
++  AddEvent(trace, HeapSimulatorTrace::Event::ALLOC, 10);
++  AddEvent(trace, HeapSimulatorTrace::Event::FREE, 10);
++  return proto;
++}
++
++TEST(HeapSimulatorReplayTest, StaleIndexAndUntracedSuffix) {
++  const HloProto proto = MakeProto();
++  const std::string original = proto.SerializeAsString();
++  std::ostringstream output;
++  const absl::Status status = ReplayHeapSimulator(proto, 4, output);
++  ASSERT_TRUE(status.ok()) << status;
++  EXPECT_EQ(proto.SerializeAsString(), original);
++  EXPECT_THAT(output.str(), HasSubstr("recorded_trace_bytes=4"));
++  EXPECT_THAT(output.str(), HasSubstr("untraced_suffix_bytes=3"));
++  EXPECT_THAT(output.str(), HasSubstr("traced_buffers=1 assigned_buffers=2"));
++  EXPECT_THAT(output.str(), HasSubstr("| size x duration"));
++}
++
++TEST(HeapSimulatorReplayTest, ReplaysColocation) {
++  HloProto proto = MakeProto();
++  auto* assignment = proto.mutable_buffer_assignment();
++  AddBuffer(assignment->mutable_buffer_allocations(0), 12, 0, 4);
++  auto* trace = assignment->mutable_heap_simulator_traces(0);
++  trace->clear_events();
++  AddEvent(trace, HeapSimulatorTrace::Event::ALLOC, 10);
++  AddEvent(trace, HeapSimulatorTrace::Event::SHARE_WITH, 12);
++  trace->mutable_events(1)->set_share_with_canonical_id(10);
++  AddEvent(trace, HeapSimulatorTrace::Event::FREE, 10);
++  AddEvent(trace, HeapSimulatorTrace::Event::FREE, 12);
++  std::ostringstream output;
++  const absl::Status status = ReplayHeapSimulator(proto, 4, output);
++  ASSERT_TRUE(status.ok()) << status;
++  EXPECT_THAT(output.str(), HasSubstr("traced_buffers=2 assigned_buffers=3"));
++}
++
++TEST(HeapSimulatorReplayTest, RejectsMultipleTraces) {
++  HloProto proto = MakeProto();
++  auto* assignment = proto.mutable_buffer_assignment();
++  const HeapSimulatorTrace copy = assignment->heap_simulator_traces(0);
++  *assignment->add_heap_simulator_traces() = copy;
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsTraceCrossingAllocations) {
++  HloProto proto = MakeProto();
++  AddEvent(proto.mutable_buffer_assignment()->mutable_heap_simulator_traces(0),
++           HeapSimulatorTrace::Event::ALLOC, 99);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsIncompleteLifetime) {
++  HloProto proto = MakeProto();
++  auto* trace =
++      proto.mutable_buffer_assignment()->mutable_heap_simulator_traces(0);
++  trace->clear_events();
++  AddEvent(trace, HeapSimulatorTrace::Event::ALLOC, 10);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsFreeWithoutAllocation) {
++  HloProto proto = MakeProto();
++  proto.mutable_buffer_assignment()
++      ->mutable_heap_simulator_traces(0)
++      ->mutable_events(0)
++      ->set_kind(HeapSimulatorTrace::Event::FREE);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsUnknownCanonicalBuffer) {
++  HloProto proto = MakeProto();
++  auto* event = proto.mutable_buffer_assignment()
++                    ->mutable_heap_simulator_traces(0)
++                    ->mutable_events(0);
++  event->set_kind(HeapSimulatorTrace::Event::SHARE_WITH);
++  event->set_share_with_canonical_id(99);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsUntracedBufferInsideHeap) {
++  HloProto proto = MakeProto();
++  proto.mutable_buffer_assignment()
++      ->mutable_buffer_allocations(0)
++      ->mutable_assigned(1)
++      ->set_offset(0);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsOutOfBoundsBuffer) {
++  HloProto proto = MakeProto();
++  proto.mutable_buffer_assignment()
++      ->mutable_buffer_allocations(0)
++      ->mutable_assigned(0)
++      ->set_size(8);
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(proto, 4, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++TEST(HeapSimulatorReplayTest, RejectsNonpositiveAlignment) {
++  std::ostringstream output;
++  EXPECT_EQ(ReplayHeapSimulator(MakeProto(), 0, output).code(),
++            absl::StatusCode::kInvalidArgument);
++}
++
++}  // namespace
++}  // namespace xla
+diff --git a/xla/xla.proto b/xla/xla.proto
+index d696df8c9d..399bfe000e 100644
+--- a/xla/xla.proto
++++ b/xla/xla.proto
+@@ -1947,7 +1947,12 @@ message DebugOptions {
+   // Requires sm_90+ and CUDA 13.3+ (tileiras) at runtime. Off by default.
+   optional bool xla_gpu_experimental_enable_tensor_ir = 557;
+ 
+-  // Next id: 558
++  // Tries additional deterministic placements of ordinary temporary buffers
++  // without changing their lifetimes or the schedule. May increase compilation
++  // time. Keeps the existing placement when no smaller heap is found.
++  optional bool xla_gpu_enable_heap_simulator_packing_search = 558;
++
++  // Next id: 559
+ 
+   // Extra options to pass to the compilation backend (e.g. LLVM); specific
+   // interpretation of these values is left to the backend.

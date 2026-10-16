@@ -1,0 +1,33 @@
+{
+  "remote_sha256": {
+    "measure-training.py": "33fdf18c45a1d31feedfddc353e10fb1ea59befe73c94929f6c80bbdbd51ee2e",
+    "run-rank.sh": "84c4065f90c9d43419999913e7af8e97b9b7c4723b5710f88970670e8abf9c5a",
+    "check-imex.py": "66b7cbef14bb0072150eef751693527448bc02f38573a989d583de26db4315e0",
+    "run-campaign.py": "62fd12a902a02f4544b5cf8759aa8b4a21ee7fb33c880b9305371a05d4522ec4",
+    "collect.py": "03ee55f62ce0d5601fca94b0bfa4b2a074d844b1c872e8bcd42a72dee7327ec1",
+    "preflight.py": "4fe1619241ff48e17eba95f84e83ae9f1382b54abe71803760bf4bba1e7fea32",
+    "preflight-rank.sh": "38e03cfeee4ca7eaf2e6adf2ab2c21623eb29e3e1313f7fa3bfbce3790449051",
+    "build.sh": "24294ef9849e7f92bfbff601ed1d77bba2dd09906a62acf2240a1dd7f5e7047c",
+    "build-clean-pr50286.sh": "406e8f0248bff08587922bd7843f5f65d8c9a525f800a6c9cd4045d75fbc3c3b",
+    "workload.json": "a6355de0277c77dbd917e1f3c17a4146ed0e17643973830cab449278bf883443",
+    "jax-pgle-profile-key.json": "8927cce3d2b8f0f14619af2d21775e9f6aed6493a1a8ac4a57ac47d8af5c4c35",
+    "variants.json": "79f59713e63ef21873aace25750e5f34a6555838ed7159ee3fd0b65621a439f3",
+    "image.json": "99628743b4beae471dcd8e7803ff55bda6d5d26cfc5880509cc7fcdb8d3d6433"
+  },
+  "local_sha256": {
+    "measure-training.py": "33fdf18c45a1d31feedfddc353e10fb1ea59befe73c94929f6c80bbdbd51ee2e",
+    "run-rank.sh": "84c4065f90c9d43419999913e7af8e97b9b7c4723b5710f88970670e8abf9c5a",
+    "check-imex.py": "66b7cbef14bb0072150eef751693527448bc02f38573a989d583de26db4315e0",
+    "run-campaign.py": "62fd12a902a02f4544b5cf8759aa8b4a21ee7fb33c880b9305371a05d4522ec4",
+    "collect.py": "03ee55f62ce0d5601fca94b0bfa4b2a074d844b1c872e8bcd42a72dee7327ec1",
+    "preflight.py": "4fe1619241ff48e17eba95f84e83ae9f1382b54abe71803760bf4bba1e7fea32",
+    "preflight-rank.sh": "38e03cfeee4ca7eaf2e6adf2ab2c21623eb29e3e1313f7fa3bfbce3790449051",
+    "build.sh": "24294ef9849e7f92bfbff601ed1d77bba2dd09906a62acf2240a1dd7f5e7047c",
+    "build-clean-pr50286.sh": "406e8f0248bff08587922bd7843f5f65d8c9a525f800a6c9cd4045d75fbc3c3b",
+    "workload.json": "a6355de0277c77dbd917e1f3c17a4146ed0e17643973830cab449278bf883443",
+    "jax-pgle-profile-key.json": "8927cce3d2b8f0f14619af2d21775e9f6aed6493a1a8ac4a57ac47d8af5c4c35",
+    "variants.json": "79f59713e63ef21873aace25750e5f34a6555838ed7159ee3fd0b65621a439f3",
+    "image.json": "99628743b4beae471dcd8e7803ff55bda6d5d26cfc5880509cc7fcdb8d3d6433"
+  },
+  "match": true
+}

@@ -1,0 +1,62 @@
+--- a/jax/_src/cache_key.py
++++ b/jax/_src/cache_key.py
+@@ -71,6 +71,7 @@
+     backend: xla_client.Client,
+     compression_algorithm: str = "zstandard",
+     ignore_custom_partitioning: bool = False,
++    profile_device_kinds_only: bool = False,
+ ) -> str:
+   """Creates a hashed string to use as a key to the compilation cache.
+ 
+@@ -86,6 +87,9 @@
+       for the executable before persisting in the cache
+     ignore_custom_partitioning: whether to remove custom_partitioning callback
+       pointers from the computation.
++    profile_device_kinds_only: use device kinds for a profile synchronization
++      key across this campaign's otherwise compatible mixed-capacity GPUs.
++      Never enable this for compiled executable cache keys.
+ 
+   Typical return value example:
+    'jit__psum-14ac577cdb2ef6d986078b4054cc9893a9a14a16dbb0d8f37b89167c1f1aacdf'
+@@ -123,7 +127,10 @@
+       ),
+       (
+           "accelerator_config",
+-          lambda hash_obj: _hash_accelerator_config(hash_obj, devices),
++          lambda hash_obj: (
++              _hash_devices if profile_device_kinds_only
++              else _hash_accelerator_config
++          )(hash_obj, devices),
+       ),
+       (
+           "compression",
+--- a/jax/_src/compilation_cache.py
++++ b/jax/_src/compilation_cache.py
+@@ -414,6 +414,7 @@
+     compile_options,
+     backend,
+     ignore_custom_partitioning: bool = False,
++    profile_device_kinds_only: bool = False,
+ ) -> str:
+   return cache_key.get(
+       module,
+@@ -422,6 +423,7 @@
+       backend,
+       "zstandard" if zstandard is not None else "zlib",
+       ignore_custom_partitioning,
++      profile_device_kinds_only=profile_device_kinds_only,
+   )
+ 
+ 
+--- a/jax/_src/compiler.py
++++ b/jax/_src/compiler.py
+@@ -674,6 +674,9 @@
+             compile_options,
+             backend,
+             ignore_custom_partitioning=True,
++            # Only the shared profile key may ignore GPU capacity differences.
++            # Executable cache keys retain the full topology fingerprint.
++            profile_device_kinds_only=True,
+         )
+         + "_fdo_sync"
+     )
