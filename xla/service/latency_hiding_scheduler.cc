@@ -1541,7 +1541,13 @@ void ReadySetLt::ComputeMemoryCost(const SchedulingState& sched_state,
   // them by -bytes/cost prefers slow openers over fast ones and makes every
   // memory-neutral op outrank every opener, which hoists small consumers of
   // large buffers away from the producers and extends live ranges.
-  if (released >= min_bytes && opened < min_bytes) {
+  // Async starts and dones are left to the overlap rules: bottom-up, a start
+  // looks like a pure releaser of the collective's output, so scoring it would
+  // reorder collectives by bytes-per-cost, which is an overlap decision and
+  // perturbs the simulated timeline without changing the peak.
+  const bool is_async_op =
+      cand_node->IsSupportedAsyncStart() || cand_node->IsSupportedAsyncDone();
+  if (!is_async_op && released >= min_bytes && opened < min_bytes) {
     score = static_cast<double>(released) /
             std::max(static_cast<double>(cand_node->GetCost()), kMinCost);
     held = static_cast<double>(released) *
@@ -1594,12 +1600,20 @@ std::optional<bool> ReadySetLt::MemoryPricedOverlapPolicy(
   const double remaining_latency = a_is_stalling_start ? ready_a : ready_b;
 
   // Scheduling the extender first keeps the buffers released by the start live
-  // for the duration of the extender.
+  // for the duration of the extender, and makes every buffer the extender
+  // opens live from here back to its producer (at least for the extender's
+  // own duration, usually much longer). A large opener used as overlap filler
+  // for a small collective is the worst case for peak memory, so its opened
+  // bytes are priced as well.
+  ScheduleCandidate& extender_cand = a_is_stalling_start ? b : a;
   const double extender_cost = extender->GetCost();
   const double stall_saved = std::min(extender_cost, remaining_latency);
   const int64_t held_bytes = std::max<int64_t>(
       -GetMemoryPressureChanges(sched_state, start_cand, start).first, 0);
-  const double byte_time = static_cast<double>(held_bytes) * extender_cost;
+  const int64_t opened_bytes = std::max<int64_t>(
+      GetMemoryPressureChanges(sched_state, extender_cand, extender).second, 0);
+  const double byte_time =
+      static_cast<double>(held_bytes + opened_bytes) * extender_cost;
   if (stall_saved >= sched_state.config.memory_cost_lambda * byte_time) {
     // Extending the overlap is worth its memory cost; let the stall rules
     // choose the extender as usual.
