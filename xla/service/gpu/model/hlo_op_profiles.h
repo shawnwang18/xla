@@ -58,6 +58,14 @@ class HloOpProfiles {
       absl::string_view profiles_text_proto,
       absl::string_view default_profile_name);
 
+  // Like above, but every device that also appears in `overrides_text_proto`
+  // takes its entries from there. A device's entries are replaced as a whole,
+  // never merged per op, so one device never mixes two measurement units.
+  static std::unique_ptr<HloOpProfiles> Load(
+      absl::string_view profiles_text_proto,
+      absl::string_view default_profile_name,
+      absl::string_view overrides_text_proto);
+
   const HloOpProfile& GetProfile(
       const se::DeviceDescription& device_info) const;
 

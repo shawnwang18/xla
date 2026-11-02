@@ -556,6 +556,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
       DebugOptions::COLLECTIVE_KERNEL_ALL_REDUCE);
   opts.set_xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel(true);
   opts.set_xla_gpu_experimental_enable_fusion_autotuner(true);
+  opts.set_xla_gpu_experimental_throughput_op_profiles(false);
   opts.set_xla_gpu_experimental_max_unroll_factor(32);
   opts.set_xla_gpu_experimental_pack_dot_operands_along_k_dimension(true);
   opts.set_xla_unsupported_crash_on_hlo_pass_fix_max_iterations(false);
@@ -3933,6 +3934,14 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
           &DebugOptions::set_xla_gpu_experimental_enable_fusion_autotuner),
       debug_options->xla_gpu_experimental_enable_fusion_autotuner(),
       "Enable autotuning between the native & triton fusion emitters."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_experimental_throughput_op_profiles",
+      bool_setter_for(
+          &DebugOptions::set_xla_gpu_experimental_throughput_op_profiles),
+      debug_options->xla_gpu_experimental_throughput_op_profiles(),
+      "Price elementwise ops in the GPU cost model with issue-throughput "
+      "profiles instead of dependency-chain latency profiles. Process-wide: "
+      "set it via XLA_FLAGS before the first compilation."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_rocm_max_trace_events",
       int64_setter_for(&DebugOptions::set_xla_gpu_rocm_max_trace_events),

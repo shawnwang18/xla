@@ -72,7 +72,40 @@ constexpr char kDeviceHloOpProfilesTest[] = R"pb(
   }
 )pb";
 
+constexpr char kDeviceHloOpProfilesOverrideTest[] = R"pb(
+  entries {
+    key: "sm_90"
+    value {
+      entries {
+        instruction {
+          opcode: "multiply"
+          shape { element_type: F32 }
+        }
+        clock_cycles: 7
+      }
+    }
+  }
+)pb";
+
 using HloOpProfilesTest = ::testing::Test;
+
+TEST_F(HloOpProfilesTest, LoadWithOverridesReplacesWholeDeviceEntry) {
+  auto hlo_op_profiles = HloOpProfiles::Load(kDeviceHloOpProfilesTest,
+                                             /*default_profile_name=*/"sm_80",
+                                             kDeviceHloOpProfilesOverrideTest);
+  // sm_90 is overridden: its base `divide` entry is gone, not merged.
+  auto device_info_sm_90 = TestGpuDeviceInfo::RTXA6000DeviceInfo(
+      stream_executor::CudaComputeCapability(9, 0));
+  EXPECT_THAT(hlo_op_profiles->GetProfile(device_info_sm_90),
+              ::testing::UnorderedElementsAre(::testing::Pair(
+                  std::make_pair(HloOpcode::kMultiply, F32), 7)));
+  // sm_80 is not overridden and keeps the base entry.
+  auto device_info_sm_80 = TestGpuDeviceInfo::RTXA6000DeviceInfo(
+      stream_executor::CudaComputeCapability(8, 0));
+  EXPECT_THAT(hlo_op_profiles->GetProfile(device_info_sm_80),
+              ::testing::UnorderedElementsAre(::testing::Pair(
+                  std::make_pair(HloOpcode::kMultiply, F32), 64)));
+}
 
 TEST_F(HloOpProfilesTest, GetProfile) {
   auto hlo_op_profiles = HloOpProfiles::Load(kDeviceHloOpProfilesTest,

@@ -1988,7 +1988,13 @@ message DebugOptions {
   // (ScanRewriterTriton).
   optional bool xla_gpu_experimental_enable_triton_scan = 562;
 
-  // Next id: 564
+  // Price elementwise ops in the GPU cost model with issue-throughput profiles
+  // (hlo_op_profiles_throughput_data.h) instead of the dependency-chain latency
+  // profiles in hlo_op_profiles_data.h. Devices without throughput data keep
+  // their latency profile. Read once per process from XLA_FLAGS.
+  optional bool xla_gpu_experimental_throughput_op_profiles = 564;
+
+  // Next id: 565
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

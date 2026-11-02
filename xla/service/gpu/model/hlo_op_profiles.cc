@@ -26,22 +26,35 @@ limitations under the License.
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "google/protobuf/text_format.h"
-#include "tsl/platform/protobuf.h"
+#include "xla/debug_options_flags.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/service/gpu/model/hlo_op_profile.pb.h"
 #include "xla/service/gpu/model/hlo_op_profiles_data.h"
+#include "xla/service/gpu/model/hlo_op_profiles_throughput_data.h"
 #include "xla/stream_executor/cuda/cuda_compute_capability.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/rocm/rocm_compute_capability.h"
+#include "xla/xla.pb.h"
+#include "tsl/platform/protobuf.h"
 
 namespace xla {
 namespace gpu {
 
 /*static*/ const HloOpProfiles& HloOpProfiles::Singleton() {
-  static const auto* hlo_op_profiles =
-      HloOpProfiles::Load(kDeviceHloOpProfiles,
-                          /*default_profile_name=*/"sm_86")
-          .release();
+  static const auto* hlo_op_profiles = [] {
+    // The singleton is shared by every compilation in the process, so the
+    // table is selected once from the process-wide flags (XLA_FLAGS).
+    const bool use_throughput_profiles =
+        GetDebugOptionsFromFlags()
+            .xla_gpu_experimental_throughput_op_profiles();
+    return HloOpProfiles::Load(
+               kDeviceHloOpProfiles,
+               /*default_profile_name=*/"sm_86",
+               use_throughput_profiles
+                   ? absl::string_view(kDeviceHloOpProfilesThroughput)
+                   : absl::string_view())
+        .release();
+  }();
   return *hlo_op_profiles;
 }
 
@@ -71,10 +84,11 @@ namespace gpu {
   return profile_name;
 }
 
-/*static*/ std::unique_ptr<HloOpProfiles> HloOpProfiles::Load(
-    absl::string_view profiles_text_proto,
-    absl::string_view default_profile_name) {
-  ProfilesNestedMap profiles_map;
+namespace {
+
+HloOpProfiles::ProfilesNestedMap ParseProfiles(
+    absl::string_view profiles_text_proto) {
+  HloOpProfiles::ProfilesNestedMap profiles_map;
   DeviceHloInstructionProfiles all_device_profiles;
   CHECK(tsl::protobuf::TextFormat::ParseFromString(profiles_text_proto,
                                                    &all_device_profiles));
@@ -82,10 +96,29 @@ namespace gpu {
     for (const auto& entry : device_profile.second.entries()) {
       auto op_code = StringToHloOpcode(entry.instruction().opcode()).value();
       auto element_type = entry.instruction().shape().element_type();
-
       profiles_map[device_profile.first][std::make_pair(
           op_code, element_type)] = entry.clock_cycles();
     }
+  }
+  return profiles_map;
+}
+
+}  // namespace
+
+/*static*/ std::unique_ptr<HloOpProfiles> HloOpProfiles::Load(
+    absl::string_view profiles_text_proto,
+    absl::string_view default_profile_name) {
+  return Load(profiles_text_proto, default_profile_name,
+              /*overrides_text_proto=*/"");
+}
+
+/*static*/ std::unique_ptr<HloOpProfiles> HloOpProfiles::Load(
+    absl::string_view profiles_text_proto,
+    absl::string_view default_profile_name,
+    absl::string_view overrides_text_proto) {
+  ProfilesNestedMap profiles_map = ParseProfiles(profiles_text_proto);
+  for (auto& [device, profile] : ParseProfiles(overrides_text_proto)) {
+    profiles_map[device] = std::move(profile);
   }
   return absl::WrapUnique(
       new HloOpProfiles(std::move(profiles_map), default_profile_name));
