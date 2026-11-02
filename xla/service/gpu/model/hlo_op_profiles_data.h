@@ -20,7 +20,7 @@ namespace xla {
 namespace gpu {
 
 // The data below is obtained with
-// xla/service/gpu/model:hlo_op_profiler_run
+// xla/service/gpu/model:hlo_op_profiler_run --mode=latency (the default).
 
 inline constexpr char kDeviceHloOpProfiles[] = R"pb(
   entries {

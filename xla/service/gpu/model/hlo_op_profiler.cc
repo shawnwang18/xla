@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/service/gpu/model/hlo_op_profiler.h"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -54,6 +55,20 @@ limitations under the License.
 
 namespace xla {
 namespace gpu {
+
+// Number of independent elements each measured kernel processes, per Mode. The
+// chain of dependent ops runs once per element. With a single element the
+// measurement is the latency of one thread's dependency chain, which for
+// special-function ops such as exp is several times their issue cost. For a
+// throughput measurement the count has to be large enough to keep every SM of
+// the device busy.
+static constexpr int64_t kLatencyNumElements = 1;
+static constexpr int64_t kThroughputNumElements = int64_t{1} << 22;
+
+static int64_t NumElementsForMode(HloOpProfiler::Mode mode) {
+  return mode == HloOpProfiler::Mode::kThroughput ? kThroughputNumElements
+                                                  : kLatencyNumElements;
+}
 
 static constexpr std::array<PrimitiveType, 13> dtypes = {
     S8, S16, S32, S64, U8, U16, U32, U64, F16, F32, F64, C64, C128,
@@ -217,9 +232,9 @@ const absl::flat_hash_set<HloOpcode>& HloOpProfiler::TooFastToMeasure() {
 }
 
 /*static*/ std::unique_ptr<HloModule> HloOpProfiler::MakeModuleForMeasurements(
-    HloOpcode op, PrimitiveType data_type, int chain_length) {
-  constexpr int64_t kInputSize = 1;
-  const Shape shape = ShapeUtil::MakeShape(data_type, {kInputSize});
+    HloOpcode op, PrimitiveType data_type, int chain_length,
+    int64_t num_elements) {
+  const Shape shape = ShapeUtil::MakeShape(data_type, {num_elements});
   HloModuleConfig config;
   config.set_debug_options(GetDebugOptionsFromFlags());
   auto module = std::make_unique<HloModule>("module", config);
@@ -260,7 +275,7 @@ const absl::flat_hash_set<HloOpcode>& HloOpProfiler::TooFastToMeasure() {
 absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
     HloOpcode op, PrimitiveType data_type, int chain_length) {
   std::unique_ptr<HloModule> module =
-      MakeModuleForMeasurements(op, data_type, chain_length);
+      MakeModuleForMeasurements(op, data_type, chain_length, num_elements_);
   HloVerifier verifier(/*layout_sensitive=*/true,
                        /*allow_mixed_precision=*/false);
   ABSL_RETURN_IF_ERROR(verifier.Run(&*module).status());
@@ -307,9 +322,12 @@ absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
 
 HloOpProfiler::HloOpProfiler(HloRunnerInterface* const absl_nonnull runner,
                              const stream_executor::DeviceDescription* const
-                             absl_nonnull device_description)
+                                 absl_nonnull device_description,
+                             Mode mode)
     : runner_(*ABSL_DIE_IF_NULL(runner)),
       dev_info_(*ABSL_DIE_IF_NULL(device_description)),
+      mode_(mode),
+      num_elements_(NumElementsForMode(mode)),
       // Twice the runtime of a copy (chain_length = 0) kernel.
       min_duration_(2 * MeasureOpChainDuration(HloOpcode::kNegate, F32, 0)
                             .value_or(absl::ZeroDuration())) {
@@ -349,14 +367,40 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
   VLOG(3) << chain_length << "\t" << double_duration;
 
   // The difference between t_double and t corresponds to half of chain_length.
+  // This is the time one chain step takes for all num_elements_ elements.
   const absl::Duration time_per_op =
       (double_duration - duration) * 2.0 / chain_length;
 
-  const float clocks_per_nanosecond =
-      dev_info_.clock_rate_ghz() * 2;  // 2 for FMA
-  const int64_t n_clocks =
-      absl::ToInt64Nanoseconds(time_per_op) * clocks_per_nanosecond;
-  VLOG(3) << time_per_op << " = " << n_clocks << " clock cycles";
+  int64_t n_clocks = 0;
+  switch (mode_) {
+    case Mode::kLatency: {
+      // Clock cycles of one dependent op, counted as 2 per cycle to match the
+      // FMA convention of GpuPerformanceModelBase::ComputeTime.
+      const float clocks_per_nanosecond =
+          dev_info_.clock_rate_ghz() * 2;  // 2 for FMA
+      n_clocks = absl::ToInt64Nanoseconds(time_per_op) * clocks_per_nanosecond;
+      VLOG(3) << time_per_op << " = " << n_clocks << " clock cycles";
+      break;
+    }
+    case Mode::kThroughput: {
+      // Express the cost in the unit GpuPerformanceModelBase::ComputeTime
+      // divides by: the FMA throughput of the whole device, counted as 2 flops
+      // per FMA. The result is the number of flops the device could have
+      // issued while it processed one element of this op, i.e. the op's issue
+      // cost relative to an FMA. It is a throughput cost, not the latency of a
+      // dependent chain.
+      const double peak_flops_per_ns =
+          static_cast<double>(dev_info_.core_count()) *
+          dev_info_.fpus_per_core() * dev_info_.clock_rate_ghz() * 2;
+      CHECK_GT(peak_flops_per_ns, 0) << "Device description lacks core counts";
+      n_clocks = std::llround(absl::ToDoubleNanoseconds(time_per_op) *
+                              peak_flops_per_ns / num_elements_);
+      VLOG(3) << time_per_op << " per chain step over " << num_elements_
+              << " elements = " << n_clocks
+              << " FMA-equivalent flops per element";
+      break;
+    }
+  }
   HloInstructionProfile profile;
   profile.mutable_instruction()->mutable_opcode()->assign(HloOpcodeString(op));
   profile.mutable_instruction()->mutable_shape()->set_element_type(data_type);

@@ -43,9 +43,27 @@ class HloOpProfiler {
     virtual uint64_t getSumKernelTimeNs() && = 0;
   };
 
+  // What a measurement reports in the `clock_cycles` field of the profile.
+  enum class Mode {
+    // Latency of one thread's dependency chain: the measured kernel processes
+    // a single element, and the result is clock cycles per op (counted as 2
+    // per cycle to match the FMA convention). This is how
+    // hlo_op_profiles_data.h was generated.
+    kLatency,
+    // Issue throughput: the measured kernel processes enough independent
+    // elements to saturate every SM, and the result is the number of
+    // FMA-equivalent flops the whole device could have issued while it
+    // processed one element of the op. This is the unit
+    // GpuPerformanceModelBase::ComputeTime divides by.
+    kThroughput,
+  };
+
   HloOpProfiler(HloRunnerInterface* absl_nonnull runner,
                 const stream_executor::DeviceDescription* absl_nonnull
-                    device_description);
+                    device_description,
+                Mode mode = Mode::kLatency);
+
+  Mode mode() const { return mode_; }
 
   static std::unique_ptr<KernelTracer> GetKernelTracer();
 
@@ -57,12 +75,16 @@ class HloOpProfiler {
 
   static absl::Span<const PrimitiveType> AllSupportedDtypes();
 
+  // Measures the cost of `op` on `data_type` in the unit selected by the
+  // profiler's Mode (see above) and stores it in the `clock_cycles` field of
+  // the profile.
   absl::StatusOr<HloInstructionProfile> MeasureClockCyclesPerOp(
       HloOpcode op, PrimitiveType data_type);
 
  private:
   static std::unique_ptr<HloModule> MakeModuleForMeasurements(
-      HloOpcode op, PrimitiveType data_type, int chain_length);
+      HloOpcode op, PrimitiveType data_type, int chain_length,
+      int64_t num_elements);
 
   absl::StatusOr<absl::Duration> MeasureOpChainDuration(HloOpcode op,
                                                         PrimitiveType data_type,
@@ -70,6 +92,9 @@ class HloOpProfiler {
 
   HloRunnerInterface& runner_;
   const se::DeviceDescription& dev_info_;
+  const Mode mode_;
+  // Number of independent elements each measured kernel processes.
+  const int64_t num_elements_;
   absl::Duration min_duration_;
 };
 

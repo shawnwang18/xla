@@ -51,21 +51,41 @@ class HloOpProfilerTest : public HloPjRtGpuTestBase {
 
 TEST_F(HloOpProfilerTest, BasicMeasurementsAreCorrect) {
   HloOpProfiler profiler(&test_runner(), &device_description());
+  ASSERT_EQ(profiler.mode(), HloOpProfiler::Mode::kLatency);
   // f32 is fast but measurable.
-  EXPECT_GT(profiler.MeasureClockCyclesPerOp(HloOpcode::kAdd, F32)
-                .value()
-                .clock_cycles(),
-            0);
+  ASSERT_OK_AND_ASSIGN(HloInstructionProfile add_f32,
+                       profiler.MeasureClockCyclesPerOp(HloOpcode::kAdd, F32));
+  EXPECT_GT(add_f32.clock_cycles(), 0);
   // f64 divide is somewhat slow.
-  EXPECT_GT(profiler.MeasureClockCyclesPerOp(HloOpcode::kDivide, F64)
-                .value()
-                .clock_cycles(),
-            IsRocm() ? 100 : 280);
+  ASSERT_OK_AND_ASSIGN(
+      HloInstructionProfile divide_f64,
+      profiler.MeasureClockCyclesPerOp(HloOpcode::kDivide, F64));
+  EXPECT_GT(divide_f64.clock_cycles(), IsRocm() ? 100 : 280);
   // c128 sqrt is slow.
-  EXPECT_GT(profiler.MeasureClockCyclesPerOp(HloOpcode::kSqrt, C128)
-                .value()
-                .clock_cycles(),
-            1000);
+  ASSERT_OK_AND_ASSIGN(
+      HloInstructionProfile sqrt_c128,
+      profiler.MeasureClockCyclesPerOp(HloOpcode::kSqrt, C128));
+  EXPECT_GT(sqrt_c128.clock_cycles(), 1000);
+}
+
+TEST_F(HloOpProfilerTest, ThroughputMeasurementsAreOrdered) {
+  HloOpProfiler profiler(&test_runner(), &device_description(),
+                         HloOpProfiler::Mode::kThroughput);
+  // f32 add is one FMA-pipe instruction: a few flops per element.
+  ASSERT_OK_AND_ASSIGN(HloInstructionProfile add_f32,
+                       profiler.MeasureClockCyclesPerOp(HloOpcode::kAdd, F32));
+  EXPECT_GT(add_f32.clock_cycles(), 0);
+  EXPECT_LT(add_f32.clock_cycles(), 16);
+  // f64 divide is a multi-instruction sequence on units with a lower rate.
+  ASSERT_OK_AND_ASSIGN(
+      HloInstructionProfile divide_f64,
+      profiler.MeasureClockCyclesPerOp(HloOpcode::kDivide, F64));
+  EXPECT_GT(divide_f64.clock_cycles(), 4 * add_f32.clock_cycles());
+  // c128 sqrt is slower still.
+  ASSERT_OK_AND_ASSIGN(
+      HloInstructionProfile sqrt_c128,
+      profiler.MeasureClockCyclesPerOp(HloOpcode::kSqrt, C128));
+  EXPECT_GT(sqrt_c128.clock_cycles(), 2 * divide_f64.clock_cycles());
 }
 
 TEST_F(HloOpProfilerTest, UnsupportedCombinationsDoNotCrash) {

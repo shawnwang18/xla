@@ -18,14 +18,15 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
-#include "tsl/platform/init_main.h"
-#include "tsl/platform/path.h"
-#include "tsl/platform/protobuf.h"
 #include "xla/backends/gpu/target_config/target_config.h"
 #include "xla/debug_options_flags.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -42,21 +43,45 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/util/command_line_flags.h"
+#include "xla/util.h"
 #include "xla/xla_data.pb.h"
+#include "tsl/platform/init_main.h"
+#include "tsl/platform/path.h"
+#include "tsl/platform/protobuf.h"
 
 namespace xla {
 namespace gpu {
 namespace {
 
 constexpr absl::string_view kUsage = R"(
-This tool measures clock cycles per operation on GPU.
+This tool measures the cost of elementwise HLO operations on GPU.
+
+--mode=latency (default) measures the latency of a dependent chain on a single
+element in clock cycles, the unit of hlo_op_profiles_data.h.
+--mode=throughput measures the issue cost on a device-filling kernel in
+FMA-equivalent flops per element, the unit GpuPerformanceModelBase::ComputeTime
+divides by.
 )";
+
+absl::StatusOr<HloOpProfiler::Mode> ParseMode(absl::string_view mode) {
+  if (mode == "latency") {
+    return HloOpProfiler::Mode::kLatency;
+  }
+  if (mode == "throughput") {
+    return HloOpProfiler::Mode::kThroughput;
+  }
+  return InvalidArgument("Unknown --mode '%s'; expected latency or throughput",
+                         mode);
+}
 
 void WriteOutput(const DeviceHloInstructionProfiles& literal,
                  absl::string_view name) {
   std::string file_name;
   std::string output_directory;
-  if (tsl::io::GetTestUndeclaredOutputsDir(&output_directory)) {
+  if (absl::StrContains(name, '/')) {
+    // A path was given: write exactly there.
+    file_name = std::string(name);
+  } else if (tsl::io::GetTestUndeclaredOutputsDir(&output_directory)) {
     file_name = tsl::io::JoinPath(
         output_directory,
         absl::StrFormat("profiles-%d-%s", tsl::Env::Default()->NowMicros(),
@@ -90,9 +115,27 @@ MakeRunnerAndGetDeviceDescription() {
 
 int RunProfiler(int argc, char** argv) {
   std::string output_file;
+  std::string opcodes_filter;
+  std::string data_types_filter;
+  std::string mode_name = "latency";
   std::vector<tsl::Flag> flag_list = {
+      tsl::Flag("mode", &mode_name,
+                "What to measure: 'latency' (default) reports clock cycles "
+                "of a dependent op chain on one element, as in "
+                "hlo_op_profiles_data.h; 'throughput' reports FMA-equivalent "
+                "flops per element on a device-filling kernel, the unit "
+                "GpuPerformanceModelBase::ComputeTime divides by."),
       tsl::Flag("output_file", &output_file,
-                "Output measurements protobuf to the destination file."),
+                "Where to write the measured profiles (text proto). A value "
+                "containing '/' is used as the file path; a bare name is "
+                "placed under TEST_UNDECLARED_OUTPUTS_DIR or a temp "
+                "directory as profiles-<time>-<name>.textproto."),
+      tsl::Flag("opcodes", &opcodes_filter,
+                "Comma-separated HLO opcode names to measure, e.g. "
+                "exponential,divide. Default: all supported opcodes."),
+      tsl::Flag("data_types", &data_types_filter,
+                "Comma-separated primitive type names to measure, e.g. "
+                "F32,F16. Default: all supported types."),
   };
   // Allow setting flags as command line argument (in addition to XLA_FLAGS
   // environment variable).
@@ -103,16 +146,34 @@ int RunProfiler(int argc, char** argv) {
     LOG(QFATAL) << "Error parsing flags";
   }
 
+  absl::StatusOr<HloOpProfiler::Mode> mode = ParseMode(mode_name);
+  if (!mode.ok()) {
+    LOG(QFATAL) << mode.status();
+  }
+  const absl::flat_hash_set<std::string> opcodes =
+      absl::StrSplit(opcodes_filter, ',', absl::SkipEmpty());
+  const absl::flat_hash_set<std::string> data_types =
+      absl::StrSplit(data_types_filter, ',', absl::SkipEmpty());
+
   auto [runner, dev_info] = MakeRunnerAndGetDeviceDescription();
-  HloOpProfiler profiler(runner.get(), &dev_info);
-  VLOG(0) << dev_info.name() << " @ " << dev_info.clock_rate_ghz() << " GHz";
+  HloOpProfiler profiler(runner.get(), &dev_info, *mode);
+  VLOG(0) << dev_info.name() << " @ " << dev_info.clock_rate_ghz() << " GHz, "
+          << dev_info.core_count() << " cores x " << dev_info.fpus_per_core()
+          << " FP32 lanes; measuring " << mode_name;
 
   HloInstructionProfileList instr_profiles;
 
   for (const PrimitiveType data_type : HloOpProfiler::AllSupportedDtypes()) {
+    if (!data_types.empty() &&
+        !data_types.contains(PrimitiveType_Name(data_type))) {
+      continue;
+    }
     for (const HloOpcode op : HloOpProfiler::AllSupportedOps()) {
       if (HloOpProfiler::TooFastToMeasure().count(op) ||
           HloOpProfiler::Unsupported().count(op)) {
+        continue;
+      }
+      if (!opcodes.empty() && !opcodes.contains(HloOpcodeString(op))) {
         continue;
       }
       auto result = profiler.MeasureClockCyclesPerOp(op, data_type);
