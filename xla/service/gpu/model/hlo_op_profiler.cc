@@ -295,7 +295,11 @@ absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
   ABSL_ASSIGN_OR_RETURN(std::unique_ptr<OpaqueExecutable> ex,
                         runner_.CreateExecutable(std::move(module),
                                                  /*run_hlo_passes=*/false));
-  if (absl::Now() - t_compile_start > absl::Seconds(10)) {
+  // Long chains compile slowly; give up on them instead of waiting. The
+  // baseline kernel (chain_length 0) is exempt: the first compilation in a
+  // process pays one-off initialization costs that have nothing to do with
+  // the chain, and losing the baseline aborts the whole profiler.
+  if (chain_length > 0 && absl::Now() - t_compile_start > absl::Seconds(10)) {
     return ResourceExhausted("Too slow compilation");
   }
 
