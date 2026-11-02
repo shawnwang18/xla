@@ -23,6 +23,7 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "xla/backends/gpu/tests/hlo_pjrt_gpu_test_base.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/gpu/model/hlo_op_profile.pb.h"
 #include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/xla_data.pb.h"
@@ -76,6 +77,12 @@ TEST_F(HloOpProfilerTest, ThroughputMeasurementsAreOrdered) {
                        profiler.MeasureClockCyclesPerOp(HloOpcode::kAdd, F32));
   EXPECT_GT(add_f32.clock_cycles(), 0);
   EXPECT_LT(add_f32.clock_cycles(), 16);
+  // f64 add runs on the FP64 units, which are never faster than the FP32
+  // units, and its kernel moves twice the bytes of the f32 kernel. A result
+  // below f32 add means the measurement was bound by memory traffic.
+  ASSERT_OK_AND_ASSIGN(HloInstructionProfile add_f64,
+                       profiler.MeasureClockCyclesPerOp(HloOpcode::kAdd, F64));
+  EXPECT_GE(add_f64.clock_cycles(), add_f32.clock_cycles());
   // f64 divide is a multi-instruction sequence on units with a lower rate.
   ASSERT_OK_AND_ASSIGN(
       HloInstructionProfile divide_f64,

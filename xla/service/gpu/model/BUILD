@@ -1038,6 +1038,7 @@ xla_test(
     args = if_google(["--heap_check="]),
     backends = ["gpu"],
     deps = [
+        ":hlo_op_profile_proto_cc",
         ":hlo_op_profiler_lib",
         "//xla:xla_data_proto_cc",
         "//xla/backends/gpu/tests:hlo_pjrt_gpu_test_base",

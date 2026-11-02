@@ -95,6 +95,8 @@ class HloOpProfiler {
   const Mode mode_;
   // Number of independent elements each measured kernel processes.
   const int64_t num_elements_;
+  // Kernel runtime below which a measurement is dominated by fixed costs. Used
+  // as is in latency mode; throughput mode raises it per data type.
   absl::Duration min_duration_;
 };
 

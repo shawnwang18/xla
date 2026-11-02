@@ -418,7 +418,13 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
       const double peak_flops_per_ns =
           static_cast<double>(dev_info_.core_count()) *
           dev_info_.fpus_per_core() * dev_info_.clock_rate_ghz() * 2;
-      CHECK_GT(peak_flops_per_ns, 0) << "Device description lacks core counts";
+      if (peak_flops_per_ns <= 0) {
+        return FailedPrecondition(
+            "Device description of %s lacks a core count, FPU count or clock "
+            "rate: %d cores x %d FPUs @ %g GHz",
+            dev_info_.name(), dev_info_.core_count(), dev_info_.fpus_per_core(),
+            dev_info_.clock_rate_ghz());
+      }
       n_clocks = std::llround(absl::ToDoubleNanoseconds(time_per_op) *
                               peak_flops_per_ns / num_elements_);
       VLOG(3) << time_per_op << " per chain step over " << num_elements_
