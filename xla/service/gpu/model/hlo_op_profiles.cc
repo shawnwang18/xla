@@ -15,17 +15,21 @@ limitations under the License.
 
 #include "xla/service/gpu/model/hlo_op_profiles.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "google/protobuf/text_format.h"
+#include "tsl/platform/protobuf.h"
 #include "xla/debug_options_flags.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/service/gpu/model/hlo_op_profile.pb.h"
@@ -35,7 +39,6 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/rocm/rocm_compute_capability.h"
 #include "xla/xla.pb.h"
-#include "tsl/platform/protobuf.h"
 
 namespace xla {
 namespace gpu {
@@ -117,8 +120,16 @@ HloOpProfiles::ProfilesNestedMap ParseProfiles(
     absl::string_view default_profile_name,
     absl::string_view overrides_text_proto) {
   ProfilesNestedMap profiles_map = ParseProfiles(profiles_text_proto);
+  std::vector<std::string> overridden_devices;
   for (auto& [device, profile] : ParseProfiles(overrides_text_proto)) {
+    overridden_devices.push_back(device);
     profiles_map[device] = std::move(profile);
+  }
+  if (!overridden_devices.empty()) {
+    std::sort(overridden_devices.begin(), overridden_devices.end());
+    LOG(INFO) << "Using override op profiles for devices: "
+              << absl::StrJoin(overridden_devices, ", ")
+              << ". All other devices keep their base profiles.";
   }
   return absl::WrapUnique(
       new HloOpProfiles(std::move(profiles_map), default_profile_name));
