@@ -783,6 +783,7 @@ cc_library(
     hdrs = [
         "hlo_op_profiles.h",
         "hlo_op_profiles_data.h",
+        "hlo_op_profiles_throughput_data.h",
     ],
     compatible_with = get_compatible_with_portable(),
     deps = [
