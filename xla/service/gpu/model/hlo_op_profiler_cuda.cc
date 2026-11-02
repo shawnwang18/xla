@@ -40,7 +40,7 @@ class CuptiKernelTracer : public HloOpProfiler::KernelTracer,
     profiler::CuptiTracerOptions options;
     options.cbids_selected.push_back(
         // Not interested in API callbacks, but empty list enables them all.
-        CUPTI_DRIVER_TRACE_CBID_cu64GLMapBufferObject);
+        CUPTI_DRIVER_TRACE_CBID_cuGLMapBufferObject);
     options.activities_selected.push_back(CUPTI_ACTIVITY_KIND_KERNEL);
     cupti_tracer_->Enable(options, this).IgnoreError();
   }
