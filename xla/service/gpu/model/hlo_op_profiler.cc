@@ -321,6 +321,22 @@ absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
   return absl::Nanoseconds(std::move(*kernel_tracer).getMedianKernelTimeNs());
 }
 
+absl::StatusOr<absl::Duration> HloOpProfiler::CopyDuration(
+    PrimitiveType data_type) {
+  if (auto it = copy_durations_.find(data_type); it != copy_durations_.end()) {
+    return it->second;
+  }
+  // The op is irrelevant for a chain of length 0.
+  ABSL_ASSIGN_OR_RETURN(absl::Duration duration,
+                        MeasureOpChainDuration(HloOpcode::kNegate, data_type,
+                                               /*chain_length=*/0));
+  VLOG(3) << "Copy duration for "
+          << primitive_util::LowercasePrimitiveTypeName(data_type) << ": "
+          << duration;
+  copy_durations_[data_type] = duration;
+  return duration;
+}
+
 int64_t HloOpProfiler::NumElements(PrimitiveType data_type) const {
   if (mode_ == Mode::kLatency) {
     // A single element: the kernel runs one thread's dependency chain.
@@ -356,6 +372,19 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
   // kMaxOpChainLength.
   constexpr int kMaxOpChainLength = 16 * 1024;
 
+  absl::Duration min_duration = min_duration_;
+  if (mode_ == Mode::kThroughput) {
+    // Every type moves the same number of bytes, but the kernels for 8- and
+    // 16-bit types are bound by per-element overhead rather than bandwidth
+    // and take several times longer than the F32 copy behind min_duration_.
+    // Below that floor the N-vs-2N difference is noise, so raise it to twice
+    // this type's own copy kernel. The factor matches min_duration_ and keeps
+    // the chains short.
+    ABSL_ASSIGN_OR_RETURN(absl::Duration copy_duration,
+                          CopyDuration(data_type));
+    min_duration = std::max(min_duration_, 2 * copy_duration);
+  }
+
   absl::Duration duration = absl::ZeroDuration();
   int chain_length = kMinOpChainLength;
   // Double the length of the operation chain until it becomes measurable
@@ -369,7 +398,7 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
                           MeasureOpChainDuration(op, data_type, chain_length));
     VLOG(3) << chain_length << "\t" << duration;
     chain_length *= 2;
-  } while (duration < min_duration_);
+  } while (duration < min_duration);
 
   ABSL_ASSIGN_OR_RETURN(absl::Duration double_duration,
                         MeasureOpChainDuration(op, data_type, chain_length));

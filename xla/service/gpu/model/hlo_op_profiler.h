@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 
 #include "absl/base/nullability.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
@@ -90,6 +91,10 @@ class HloOpProfiler {
                                                         PrimitiveType data_type,
                                                         int chain_length);
 
+  // Duration of a copy kernel (chain length 0) over NumElements(data_type)
+  // elements of `data_type`, measured once per type. Throughput mode only.
+  absl::StatusOr<absl::Duration> CopyDuration(PrimitiveType data_type);
+
   // Number of independent elements the measured kernel processes: one in
   // latency mode, a fixed byte budget's worth of `data_type` in throughput
   // mode.
@@ -99,9 +104,10 @@ class HloOpProfiler {
   const se::DeviceDescription& dev_info_;
   const Mode mode_;
   // Kernel runtime below which a measurement is dominated by fixed costs: twice
-  // an F32 copy kernel. In throughput mode every data type moves the same
-  // number of bytes, so the same floor applies to all of them.
+  // an F32 copy kernel. Throughput mode raises it to twice the copy kernel of
+  // the measured data type when that is slower (see CopyDuration).
   absl::Duration min_duration_;
+  absl::flat_hash_map<PrimitiveType, absl::Duration> copy_durations_;
 };
 
 }  // namespace gpu
