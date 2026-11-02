@@ -90,13 +90,17 @@ class HloOpProfiler {
                                                         PrimitiveType data_type,
                                                         int chain_length);
 
+  // Number of independent elements the measured kernel processes: one in
+  // latency mode, a fixed byte budget's worth of `data_type` in throughput
+  // mode.
+  int64_t NumElements(PrimitiveType data_type) const;
+
   HloRunnerInterface& runner_;
   const se::DeviceDescription& dev_info_;
   const Mode mode_;
-  // Number of independent elements each measured kernel processes.
-  const int64_t num_elements_;
-  // Kernel runtime below which a measurement is dominated by fixed costs. Used
-  // as is in latency mode; throughput mode raises it per data type.
+  // Kernel runtime below which a measurement is dominated by fixed costs: twice
+  // an F32 copy kernel. In throughput mode every data type moves the same
+  // number of bytes, so the same floor applies to all of them.
   absl::Duration min_duration_;
 };
 

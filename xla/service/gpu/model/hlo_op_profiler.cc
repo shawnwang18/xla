@@ -57,19 +57,15 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-// Number of independent elements each measured kernel processes, per Mode. The
-// chain of dependent ops runs once per element. With a single element the
-// measurement is the latency of one thread's dependency chain, which for
-// special-function ops such as exp is several times their issue cost. For a
-// throughput measurement the count has to be large enough to keep every SM of
-// the device busy.
-static constexpr int64_t kLatencyNumElements = 1;
-static constexpr int64_t kThroughputNumElements = int64_t{1} << 22;
-
-static int64_t NumElementsForMode(HloOpProfiler::Mode mode) {
-  return mode == HloOpProfiler::Mode::kThroughput ? kThroughputNumElements
-                                                  : kLatencyNumElements;
-}
+// Bytes per operand of the kernel measured in throughput mode (16 MiB; 2^22
+// F32 elements). The chain of dependent ops runs once per element, so the
+// element count has to be large enough to keep every SM of the device busy.
+// It is derived from a byte budget rather than fixed so that every element type
+// spends the same time on the memory traffic of the kernel: the measurement
+// below has to grow the chain until compute exceeds that traffic, and keeping
+// the floor equal across types keeps the chains short. Long chains overestimate
+// cheap ops because the unrolled kernel body outgrows the instruction cache.
+static constexpr int64_t kThroughputBytesPerOperand = int64_t{1} << 24;
 
 static constexpr std::array<PrimitiveType, 13> dtypes = {
     S8, S16, S32, S64, U8, U16, U32, U64, F16, F32, F64, C64, C128,
@@ -275,8 +271,8 @@ const absl::flat_hash_set<HloOpcode>& HloOpProfiler::TooFastToMeasure() {
 
 absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
     HloOpcode op, PrimitiveType data_type, int chain_length) {
-  std::unique_ptr<HloModule> module =
-      MakeModuleForMeasurements(op, data_type, chain_length, num_elements_);
+  std::unique_ptr<HloModule> module = MakeModuleForMeasurements(
+      op, data_type, chain_length, NumElements(data_type));
   HloVerifier verifier(/*layout_sensitive=*/true,
                        /*allow_mixed_precision=*/false);
   ABSL_RETURN_IF_ERROR(verifier.Run(&*module).status());
@@ -321,6 +317,15 @@ absl::StatusOr<absl::Duration> HloOpProfiler::MeasureOpChainDuration(
   return absl::Nanoseconds(std::move(*kernel_tracer).getMedianKernelTimeNs());
 }
 
+int64_t HloOpProfiler::NumElements(PrimitiveType data_type) const {
+  if (mode_ == Mode::kLatency) {
+    // A single element: the kernel runs one thread's dependency chain.
+    return 1;
+  }
+  return std::max<int64_t>(
+      1, kThroughputBytesPerOperand / primitive_util::ByteWidth(data_type));
+}
+
 HloOpProfiler::HloOpProfiler(HloRunnerInterface* const absl_nonnull runner,
                              const stream_executor::DeviceDescription* const
                                  absl_nonnull device_description,
@@ -328,7 +333,6 @@ HloOpProfiler::HloOpProfiler(HloRunnerInterface* const absl_nonnull runner,
     : runner_(*ABSL_DIE_IF_NULL(runner)),
       dev_info_(*ABSL_DIE_IF_NULL(device_description)),
       mode_(mode),
-      num_elements_(NumElementsForMode(mode)),
       // Twice the runtime of a copy (chain_length = 0) kernel.
       min_duration_(2 * MeasureOpChainDuration(HloOpcode::kNegate, F32, 0)
                             .value_or(absl::ZeroDuration())) {
@@ -348,22 +352,6 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
   // kMaxOpChainLength.
   constexpr int kMaxOpChainLength = 16 * 1024;
 
-  absl::Duration min_duration = min_duration_;
-  if (mode_ == Mode::kThroughput) {
-    // The device-filling kernel is memory-bound until the op chain is long
-    // enough to dominate the copy of its operands. That memory floor scales
-    // with the element width, so the single F32 baseline in min_duration_
-    // underestimates it for 8- and 16-byte types, and the N-vs-2N difference
-    // below degenerates into noise. Measure the copy time for this data type
-    // and require the chain to clearly exceed it.
-    ABSL_ASSIGN_OR_RETURN(absl::Duration copy_duration,
-                          MeasureOpChainDuration(op, data_type, 0));
-    min_duration = std::max(min_duration_, 4 * copy_duration);
-    VLOG(3) << "Copy duration for "
-            << primitive_util::LowercasePrimitiveTypeName(data_type) << ": "
-            << copy_duration << ", minimum chain duration: " << min_duration;
-  }
-
   absl::Duration duration = absl::ZeroDuration();
   int chain_length = kMinOpChainLength;
   // Double the length of the operation chain until it becomes measurable
@@ -377,14 +365,15 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
                           MeasureOpChainDuration(op, data_type, chain_length));
     VLOG(3) << chain_length << "\t" << duration;
     chain_length *= 2;
-  } while (duration < min_duration);
+  } while (duration < min_duration_);
 
   ABSL_ASSIGN_OR_RETURN(absl::Duration double_duration,
                         MeasureOpChainDuration(op, data_type, chain_length));
   VLOG(3) << chain_length << "\t" << double_duration;
 
   // The difference between t_double and t corresponds to half of chain_length.
-  // This is the time one chain step takes for all num_elements_ elements.
+  // In throughput mode this is the time one chain step takes for all
+  // NumElements(data_type) elements.
   const absl::Duration time_per_op =
       (double_duration - duration) * 2.0 / chain_length;
   if (time_per_op <= absl::ZeroDuration()) {
@@ -425,9 +414,10 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
             dev_info_.name(), dev_info_.core_count(), dev_info_.fpus_per_core(),
             dev_info_.clock_rate_ghz());
       }
+      const int64_t num_elements = NumElements(data_type);
       n_clocks = std::llround(absl::ToDoubleNanoseconds(time_per_op) *
-                              peak_flops_per_ns / num_elements_);
-      VLOG(3) << time_per_op << " per chain step over " << num_elements_
+                              peak_flops_per_ns / num_elements);
+      VLOG(3) << time_per_op << " per chain step over " << num_elements
               << " elements = " << n_clocks
               << " FMA-equivalent flops per element";
       break;
