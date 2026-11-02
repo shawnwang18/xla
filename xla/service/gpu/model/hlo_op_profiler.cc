@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/service/gpu/model/hlo_op_profiler.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -347,6 +348,22 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
   // kMaxOpChainLength.
   constexpr int kMaxOpChainLength = 16 * 1024;
 
+  absl::Duration min_duration = min_duration_;
+  if (mode_ == Mode::kThroughput) {
+    // The device-filling kernel is memory-bound until the op chain is long
+    // enough to dominate the copy of its operands. That memory floor scales
+    // with the element width, so the single F32 baseline in min_duration_
+    // underestimates it for 8- and 16-byte types, and the N-vs-2N difference
+    // below degenerates into noise. Measure the copy time for this data type
+    // and require the chain to clearly exceed it.
+    ABSL_ASSIGN_OR_RETURN(absl::Duration copy_duration,
+                          MeasureOpChainDuration(op, data_type, 0));
+    min_duration = std::max(min_duration_, 4 * copy_duration);
+    VLOG(3) << "Copy duration for "
+            << primitive_util::LowercasePrimitiveTypeName(data_type) << ": "
+            << copy_duration << ", minimum chain duration: " << min_duration;
+  }
+
   absl::Duration duration = absl::ZeroDuration();
   int chain_length = kMinOpChainLength;
   // Double the length of the operation chain until it becomes measurable
@@ -360,7 +377,7 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
                           MeasureOpChainDuration(op, data_type, chain_length));
     VLOG(3) << chain_length << "\t" << duration;
     chain_length *= 2;
-  } while (duration < min_duration_);
+  } while (duration < min_duration);
 
   ABSL_ASSIGN_OR_RETURN(absl::Duration double_duration,
                         MeasureOpChainDuration(op, data_type, chain_length));
@@ -370,6 +387,15 @@ absl::StatusOr<HloInstructionProfile> HloOpProfiler::MeasureClockCyclesPerOp(
   // This is the time one chain step takes for all num_elements_ elements.
   const absl::Duration time_per_op =
       (double_duration - duration) * 2.0 / chain_length;
+  if (time_per_op <= absl::ZeroDuration()) {
+    return Internal(
+        "%s %s: non-positive measured cost (%s for chain %d vs %s for chain "
+        "%d); the kernel is not compute-bound at this chain length",
+        HloOpcodeString(op),
+        primitive_util::LowercasePrimitiveTypeName(data_type),
+        absl::FormatDuration(duration), chain_length / 2,
+        absl::FormatDuration(double_duration), chain_length);
+  }
 
   int64_t n_clocks = 0;
   switch (mode_) {
