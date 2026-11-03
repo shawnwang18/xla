@@ -27,6 +27,7 @@ cc_library(
     srcs = ["opt_main.cc"],
     deps = [
         ":opt_lib",
+        "//xla:xla_proto_cc",
         "//xla:debug_options_flags",
         "//xla/hlo/ir:hlo",
         "//xla/service:hlo_module_config",

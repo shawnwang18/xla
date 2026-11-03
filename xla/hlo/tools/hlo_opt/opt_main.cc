@@ -46,6 +46,7 @@ limitations under the License.
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/util/command_line_flags.h"
+#include "xla/xla.pb.h"
 
 namespace {
 const char* const kUsage = R"(
@@ -146,6 +147,22 @@ absl::StatusOr<std::vector<std::unique_ptr<HloModule>>> GetModules(
     // Experiment hook: modules dumped from JAX with named (V3) shardings need
     // the Shardy partitioner, which is a module-config bit the HLO text does
     // not carry.
+    // Experiment hook: HLO_OPT_MODULE_CONFIG=<path to *.config.pbtxt> applies
+    // the dumped HloModuleConfig (partitions, SPMD, layouts, ...) to the module
+    // while keeping the debug options given on the command line / XLA_FLAGS.
+    if (const char* cfg = std::getenv("HLO_OPT_MODULE_CONFIG"); cfg && *cfg) {
+      HloModuleConfigProto config_proto;
+      ABSL_RETURN_IF_ERROR(
+          tsl::ReadTextProto(tsl::Env::Default(), cfg, &config_proto));
+      ABSL_ASSIGN_OR_RETURN(std::unique_ptr<HloModuleConfig> config,
+                            HloModuleConfig::CreateFromProto(config_proto));
+      config->set_debug_options(module->config().debug_options());
+      module->set_config(*config);
+      LOG(INFO) << "Applied module config from " << cfg
+                << ": num_partitions=" << module->config().num_partitions()
+                << " use_spmd=" << module->config().use_spmd_partitioning()
+                << " use_shardy=" << module->config().use_shardy_partitioner();
+    }
     if (const char* v = std::getenv("HLO_OPT_USE_SHARDY"); v && *v == '1') {
       module->mutable_config().set_use_shardy_partitioner(true);
     }
