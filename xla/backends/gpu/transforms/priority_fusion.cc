@@ -35,6 +35,7 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/status_macros.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
@@ -322,6 +323,26 @@ class PriorityFusionQueue {
                                      ->config()
                                      .debug_options()
                                      .xla_dump_fusion_visualization();
+    // Prototype knob: fraction of a duplicated producer's compute time that is
+    // charged as not overlapped with memory traffic, per extra consumer. Read
+    // from
+    // --xla_backend_extra_options=xla_gpu_fusion_duplication_compute_penalty=<f>.
+    const auto& extra_options = computation->parent()
+                                    ->config()
+                                    .debug_options()
+                                    .xla_backend_extra_options();
+    if (auto it = extra_options.find(kDuplicationComputePenaltyOption);
+        it != extra_options.end()) {
+      if (!absl::SimpleAtod(it->second, &duplication_compute_penalty_) ||
+          duplication_compute_penalty_ < 0.0) {
+        LOG(WARNING) << "Ignoring invalid " << kDuplicationComputePenaltyOption
+                     << "=" << it->second;
+        duplication_compute_penalty_ = 0.0;
+      } else {
+        LOG(INFO) << "Priority fusion duplication compute penalty factor: "
+                  << duplication_compute_penalty_;
+      }
+    }
   }
 
   absl::Status ComputeAndSetPriorities(
@@ -803,6 +824,35 @@ class PriorityFusionQueue {
           FindOrDie(reverse_map_, producer);
       current_priority = queue_it->first.first;
     }
+
+    // Duplication penalty: fusing the producer into N > 1 consumers evaluates
+    // its arithmetic N times. The performance model assumes 95% of that
+    // arithmetic overlaps with memory traffic in every copy, which is too
+    // optimistic for kernels near the compute/memory balance point. Charge a
+    // fraction of the producer's compute time for each extra copy. The penalty
+    // is recomputed from scratch and reconciled against the value already
+    // folded into `current_priority` on incremental updates.
+    absl::Duration penalty_delta = absl::ZeroDuration();
+    if (duplication_compute_penalty_ > 0.0) {
+      absl::Duration penalty = absl::ZeroDuration();
+      const int64_t num_consumers = producer->user_count();
+      if (num_consumers > 1) {
+        ABSL_ASSIGN_OR_RETURN(
+            EstimateRunTimeData producer_runtime,
+            combined_gpu_performance_model_.EstimateRunTimeForInstruction(
+                producer, cost_analysis_.get()));
+        penalty = producer_runtime.compute_time * duplication_compute_penalty_ *
+                  static_cast<double>(num_consumers - 1);
+      }
+      absl::MutexLock lock(duplication_penalty_mutex_);
+      absl::Duration& applied = applied_duplication_penalty_[producer];
+      penalty_delta =
+          penalty - (is_incremental_update ? applied : absl::ZeroDuration());
+      applied = penalty;
+      VLOG(5) << "Duplication penalty for " << producer->name() << " into "
+              << num_consumers << " consumers: " << penalty;
+    }
+    run_times.time_fused += penalty_delta;
 
     if (fusion_process_dump_) {
       absl::MutexLock lock(fusion_process_dump_mutex_);
@@ -1347,6 +1397,14 @@ class PriorityFusionQueue {
       operands_to_new_consumers_;
   absl::flat_hash_map<HloInstruction*, GpuPerformanceModel::RunTimes>
       operands_to_removed_consumers_runtimes_;
+  // Duplication penalty factor (0 disables) and the penalty last folded into
+  // each producer's priority, for incremental updates.
+  static constexpr absl::string_view kDuplicationComputePenaltyOption =
+      "xla_gpu_fusion_duplication_compute_penalty";
+  double duplication_compute_penalty_ = 0.0;
+  absl::Mutex duplication_penalty_mutex_;
+  absl::flat_hash_map<HloInstruction*, absl::Duration>
+      applied_duplication_penalty_ ABSL_GUARDED_BY(duplication_penalty_mutex_);
   // Proto with structured logs of fusion decisions. Used only for debugging. If
   // null, logging is disabled.
   FusionProcessDumpProto* fusion_process_dump_;
