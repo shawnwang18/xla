@@ -17,6 +17,7 @@ limitations under the License.
 // given platform(s). See kUsage for details.
 
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -142,6 +143,12 @@ absl::StatusOr<std::vector<std::unique_ptr<HloModule>>> GetModules(
     }
     ABSL_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
                           LoadModuleFromData(hlo, format));
+    // Experiment hook: modules dumped from JAX with named (V3) shardings need
+    // the Shardy partitioner, which is a module-config bit the HLO text does
+    // not carry.
+    if (const char* v = std::getenv("HLO_OPT_USE_SHARDY"); v && *v == '1') {
+      module->mutable_config().set_use_shardy_partitioner(true);
+    }
     out.push_back(std::move(module));
   }
   return out;
