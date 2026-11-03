@@ -18,13 +18,16 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "xla/backends/gpu/target_config/target_config.h"
@@ -34,6 +37,7 @@ limitations under the License.
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h"
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_client_options.h"
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_pjrt_client.h"
+#include "xla/primitive_util.h"
 #include "xla/service/gpu/model/hlo_op_profile.pb.h"
 #include "xla/service/gpu/model/hlo_op_profiler.h"
 #include "xla/service/gpu/model/hlo_op_profiles.h"
@@ -61,6 +65,8 @@ element in clock cycles, the unit of hlo_op_profiles_data.h.
 --mode=throughput measures the issue cost on a device-filling kernel in
 FMA-equivalent flops per element, the unit GpuPerformanceModelBase::ComputeTime
 divides by.
+--opcodes and --data_types restrict the measurement to the listed names. A name
+the tool cannot measure is an error rather than silently skipped.
 )";
 
 absl::StatusOr<HloOpProfiler::Mode> ParseMode(absl::string_view mode) {
@@ -72,6 +78,62 @@ absl::StatusOr<HloOpProfiler::Mode> ParseMode(absl::string_view mode) {
   }
   return InvalidArgument("Unknown --mode '%s'; expected latency or throughput",
                          mode);
+}
+
+// Splits a comma-separated flag value into trimmed, lower-cased tokens.
+std::vector<std::string> SplitFlagList(absl::string_view value) {
+  std::vector<std::string> tokens;
+  for (absl::string_view token :
+       absl::StrSplit(value, ',', absl::SkipWhitespace())) {
+    tokens.push_back(absl::AsciiStrToLower(absl::StripAsciiWhitespace(token)));
+  }
+  return tokens;
+}
+
+// Parses --opcodes. A name that is not an HLO opcode, or that the profiler does
+// not measure, is fatal: skipping it silently would write an incomplete or
+// empty profile and exit successfully.
+absl::flat_hash_set<HloOpcode> ParseOpcodesFilter(absl::string_view value) {
+  absl::flat_hash_set<HloOpcode> opcodes;
+  for (const std::string& name : SplitFlagList(value)) {
+    absl::StatusOr<HloOpcode> op = StringToHloOpcode(name);
+    if (!op.ok()) {
+      LOG(QFATAL) << "--opcodes: '" << name << "' is not an HLO opcode";
+    }
+    if (!absl::c_linear_search(HloOpProfiler::AllSupportedOps(), *op) ||
+        HloOpProfiler::Unsupported().contains(*op) ||
+        HloOpProfiler::TooFastToMeasure().contains(*op)) {
+      LOG(QFATAL) << "--opcodes: " << name
+                  << " is not measured by this tool (not elementwise, "
+                     "unsupported, or too fast to measure)";
+    }
+    opcodes.insert(*op);
+  }
+  return opcodes;
+}
+
+// Parses --data_types; names are case-insensitive. Same policy as above.
+absl::flat_hash_set<PrimitiveType> ParseDataTypesFilter(
+    absl::string_view value) {
+  absl::flat_hash_set<PrimitiveType> data_types;
+  for (const std::string& name : SplitFlagList(value)) {
+    absl::StatusOr<PrimitiveType> type =
+        primitive_util::StringToPrimitiveType(name);
+    if (!type.ok() ||
+        !absl::c_linear_search(HloOpProfiler::AllSupportedDtypes(), *type)) {
+      LOG(QFATAL) << "--data_types: '" << name
+                  << "' is not a type this tool measures; supported: "
+                  << absl::StrJoin(
+                         HloOpProfiler::AllSupportedDtypes(), ",",
+                         [](std::string* out, PrimitiveType type) {
+                           absl::StrAppend(
+                               out, primitive_util::LowercasePrimitiveTypeName(
+                                        type));
+                         });
+    }
+    data_types.insert(*type);
+  }
+  return data_types;
 }
 
 void WriteOutput(const DeviceHloInstructionProfiles& literal,
@@ -132,10 +194,12 @@ int RunProfiler(int argc, char** argv) {
                 "directory as profiles-<time>-<name>.textproto."),
       tsl::Flag("opcodes", &opcodes_filter,
                 "Comma-separated HLO opcode names to measure, e.g. "
-                "exponential,divide. Default: all supported opcodes."),
+                "exponential,divide. Default: all supported opcodes. A name "
+                "the tool does not measure is an error."),
       tsl::Flag("data_types", &data_types_filter,
-                "Comma-separated primitive type names to measure, e.g. "
-                "F32,F16. Default: all supported types."),
+                "Comma-separated primitive type names to measure, "
+                "case-insensitive, e.g. f32,f16. Default: all supported "
+                "types. A name the tool does not measure is an error."),
   };
   // Allow setting flags as command line argument (in addition to XLA_FLAGS
   // environment variable).
@@ -150,10 +214,10 @@ int RunProfiler(int argc, char** argv) {
   if (!mode.ok()) {
     LOG(QFATAL) << mode.status();
   }
-  const absl::flat_hash_set<std::string> opcodes =
-      absl::StrSplit(opcodes_filter, ',', absl::SkipEmpty());
-  const absl::flat_hash_set<std::string> data_types =
-      absl::StrSplit(data_types_filter, ',', absl::SkipEmpty());
+  const absl::flat_hash_set<HloOpcode> opcodes =
+      ParseOpcodesFilter(opcodes_filter);
+  const absl::flat_hash_set<PrimitiveType> data_types =
+      ParseDataTypesFilter(data_types_filter);
 
   auto [runner, dev_info] = MakeRunnerAndGetDeviceDescription();
   HloOpProfiler profiler(runner.get(), &dev_info, *mode);
@@ -164,8 +228,7 @@ int RunProfiler(int argc, char** argv) {
   HloInstructionProfileList instr_profiles;
 
   for (const PrimitiveType data_type : HloOpProfiler::AllSupportedDtypes()) {
-    if (!data_types.empty() &&
-        !data_types.contains(PrimitiveType_Name(data_type))) {
+    if (!data_types.empty() && !data_types.contains(data_type)) {
       continue;
     }
     for (const HloOpcode op : HloOpProfiler::AllSupportedOps()) {
@@ -173,7 +236,7 @@ int RunProfiler(int argc, char** argv) {
           HloOpProfiler::Unsupported().count(op)) {
         continue;
       }
-      if (!opcodes.empty() && !opcodes.contains(HloOpcodeString(op))) {
+      if (!opcodes.empty() && !opcodes.contains(op)) {
         continue;
       }
       auto result = profiler.MeasureClockCyclesPerOp(op, data_type);
