@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/gpu/model/gpu_indexing_performance_model.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -51,13 +53,14 @@ CombinedGpuPerformanceModel::CombinedGpuPerformanceModel(
     mlir::MLIRContext& mlir_context,
     HloCostAnalysis::ShapeSizeFunction shape_size,
     bool enable_same_shape_multi_output_fusion,
-    MlirContextPool* mlir_context_pool)
+    MlirContextPool* mlir_context_pool,
+    std::optional<OccupancyModelParams> occupancy_params)
     : device_info_(device_info),
       fusion_analysis_cache_(fusion_analysis_cache),
       indexing_model_(&device_info, &fusion_analysis_cache, shape_size,
                       &mlir_context, enable_same_shape_multi_output_fusion,
-                      mlir_context_pool),
-      model_(device_info, fusion_analysis_cache, cache_) {}
+                      mlir_context_pool, occupancy_params),
+      model_(device_info, fusion_analysis_cache, cache_, occupancy_params) {}
 
 absl::StatusOr<EstimateRunTimeData>
 CombinedGpuPerformanceModel::EstimateRunTimeForInstruction(

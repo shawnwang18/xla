@@ -19,6 +19,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,7 @@ limitations under the License.
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/gpu/model/gpu_indexing_performance_model.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/hlo_module_config.h"
@@ -749,6 +751,83 @@ ENTRY entry_computation.1 {
       producer, consumer, &analysis_);
   EXPECT_NEAR(absl::ToInt64Milliseconds(t.time_unfused), 120, 1);
   EXPECT_NEAR(absl::ToInt64Milliseconds(t.time_fused), 103, 1);
+}
+
+// The same model with and without the occupancy model on an H100 SXM.
+class GpuPerformanceModelOccupancyTest : public HloHardwareIndependentTestBase {
+ public:
+  absl::Duration ExecTime(GpuPerformanceModel& model,
+                          const HloInstruction* instr) {
+    return model.EstimateRunTimeForInstruction(instr, &analysis_).exec_time;
+  }
+
+  GpuHloCostAnalysis::Options options_{.count_multiple_input_accesses = true};
+  se::DeviceDescription device_info_{TestGpuDeviceInfo::H100SXMDeviceInfo()};
+  HloFusionAnalysisCache fusion_analysis_cache_{device_info_};
+  GpuHloCostAnalysis analysis_{options_, device_info_};
+  GpuPerformanceModelCache default_cache_;
+  GpuPerformanceModel default_model_{device_info_, fusion_analysis_cache_,
+                                     default_cache_, std::nullopt};
+  GpuPerformanceModelCache occupancy_cache_;
+  GpuPerformanceModel occupancy_model_{device_info_, fusion_analysis_cache_,
+                                       occupancy_cache_,
+                                       OccupancyModelParams{}};
+};
+
+TEST_F(GpuPerformanceModelOccupancyTest,
+       LargeElementwiseFusionIsBandwidthBound) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+f {
+  p0 = f32[4096,4096] parameter(0)
+  ROOT n = f32[4096,4096] negate(p0)
+}
+
+ENTRY e {
+  p0 = f32[4096,4096] parameter(0)
+  ROOT r = f32[4096,4096] fusion(p0), kind=kLoop, calls=f
+}
+)";
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo_string));
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  ASSERT_IS_OK(module->entry_computation()->Accept(&analysis_));
+
+  // 128 MiB of traffic. The default model uses the datasheet bandwidth; the
+  // occupancy model saturates at 90% of it over many waves of full SMs, plus
+  // a trailing wave whose share depends on the emitter's unroll factor.
+  double default_us = absl::ToDoubleMicroseconds(ExecTime(default_model_, root));
+  double occupancy_us =
+      absl::ToDoubleMicroseconds(ExecTime(occupancy_model_, root));
+  EXPECT_NEAR(default_us, 40.0, 0.5);
+  EXPECT_NEAR(occupancy_us, 44.5, 1.5);
+  EXPECT_GT(occupancy_us, default_us);
+}
+
+TEST_F(GpuPerformanceModelOccupancyTest, SmallFusionIsBoundByRequestsInFlight) {
+  absl::string_view hlo_string = R"(
+HloModule m
+
+f {
+  p0 = f32[1024] parameter(0)
+  ROOT n = f32[1024] negate(p0)
+}
+
+ENTRY e {
+  p0 = f32[1024] parameter(0)
+  ROOT r = f32[1024] fusion(p0), kind=kLoop, calls=f
+}
+)";
+  ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo_string));
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  ASSERT_IS_OK(module->entry_computation()->Accept(&analysis_));
+
+  // A handful of warps move 8 KiB. The default model sees a few tens of
+  // nanoseconds; the occupancy model sees two memory round trips, since the
+  // warps cannot keep enough requests in flight to do better.
+  EXPECT_LT(absl::ToDoubleMicroseconds(ExecTime(default_model_, root)), 0.1);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(ExecTime(occupancy_model_, root)), 1.2,
+              0.15);
 }
 
 }  // namespace

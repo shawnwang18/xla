@@ -71,6 +71,7 @@ limitations under the License.
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/gpu/model/gpu_indexing_performance_model.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/gpu/model/triton_emitter_constraints.h"
@@ -307,7 +308,9 @@ class PriorityFusionQueue {
                 ->config()
                 .debug_options()
                 .xla_gpu_experimental_enable_same_shape_multi_output_fusion(),
-            mlir_context_pool),
+            mlir_context_pool,
+            OccupancyModelParamsFromDebugOptions(
+                computation->parent()->config().debug_options())),
         fusion_process_dump_(fusion_process_dump),
         thread_pool_(thread_pool),
         tiling_search_executor_(

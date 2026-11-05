@@ -17,6 +17,7 @@ limitations under the License.
 #define XLA_SERVICE_GPU_MODEL_GPU_PERFORMANCE_MODEL_H_
 
 #include <memory>
+#include <optional>
 
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -24,6 +25,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/stream_executor/device_description.h"
 
@@ -33,9 +35,25 @@ namespace gpu {
 class GpuPerformanceModel : public GpuPerformanceModelBase {
  public:
   // Lifetime to all references to this constructor must live at least as long
+  //
+  // With `occupancy_params`, kernels are estimated with the occupancy model
+  // (see gpu_occupancy_model.h); with nullopt, with the default model. The
+  // default follows the process-wide flags.
   GpuPerformanceModel(const se::DeviceDescription& device_info,
                       HloFusionAnalysisCache& fusion_analysis_cache,
-                      GpuPerformanceModelCache& gpu_performance_model_cache);
+                      GpuPerformanceModelCache& gpu_performance_model_cache,
+                      std::optional<OccupancyModelParams> occupancy_params =
+                          OccupancyModelParamsFromFlags());
+
+  // Selects the occupancy model (or, with nullopt, the default model) for
+  // estimates made after this call. Does not invalidate cached estimates.
+  void set_occupancy_model_params(
+      std::optional<OccupancyModelParams> occupancy_params) {
+    occupancy_params_ = occupancy_params;
+  }
+  const std::optional<OccupancyModelParams>& occupancy_model_params() const {
+    return occupancy_params_;
+  }
 
   EstimateRunTimeData EstimateRunTimeForInstruction(
       const HloInstruction* instr, const GpuHloCostAnalysis* cost_analysis);
@@ -77,6 +95,7 @@ class GpuPerformanceModel : public GpuPerformanceModelBase {
   // this is not possible because the cache is used directly by
   // xla::gpu::PriorityFusionQueue
   GpuPerformanceModelCache& gpu_performance_model_cache_;
+  std::optional<OccupancyModelParams> occupancy_params_;
 };
 
 // An owning wrapper around GpuPerformanceModel that also owns the caches.
@@ -86,11 +105,14 @@ class GpuPerformanceModel : public GpuPerformanceModelBase {
 // owning model should be used.
 class GpuPerformanceModelOwning {
  public:
-  explicit GpuPerformanceModelOwning(const se::DeviceDescription& device_info)
+  explicit GpuPerformanceModelOwning(
+      const se::DeviceDescription& device_info,
+      std::optional<OccupancyModelParams> occupancy_params =
+          OccupancyModelParamsFromFlags())
       : fusion_analysis_cache_(device_info),
         gpu_performance_model_(std::make_unique<GpuPerformanceModel>(
-            device_info, fusion_analysis_cache_,
-            gpu_performance_model_cache_)) {};
+            device_info, fusion_analysis_cache_, gpu_performance_model_cache_,
+            occupancy_params)) {};
 
   GpuPerformanceModel& Get() const { return *gpu_performance_model_; }
 

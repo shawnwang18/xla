@@ -36,7 +36,10 @@ limitations under the License.
 #include "xla/service/gpu/model/coalescing_analysis.h"
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
@@ -44,13 +47,61 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
+namespace {
+
+int64_t ElementsInShape(const Shape& shape) {
+  if (!shape.IsArray() && !shape.IsTuple()) {
+    return 0;
+  }
+  return ShapeUtil::ElementsInRecursive(shape);
+}
+
+// Size in bytes of one element of the first array in `shape`, or 4 if there
+// is none.
+int64_t LeafElementSizeInBytes(const Shape& shape) {
+  const Shape* leaf = &shape;
+  while (leaf->IsTuple() && !leaf->tuple_shapes().empty()) {
+    leaf = &leaf->tuple_shapes(0);
+  }
+  if (!leaf->IsArray()) {
+    return 4;
+  }
+  return ShapeUtil::ByteSizeOfPrimitiveType(leaf->element_type());
+}
+
+// Hints for the occupancy model of a kernel with output `output_shape` that
+// reads `operands` and runs with `launch_dimensions`. The elements per thread
+// come from the largest array the kernel touches, so that a reduction's input
+// loop counts as well as an elementwise kernel's unroll.
+template <typename Operands>
+KernelOccupancyHints MakeOccupancyHints(
+    const Shape& output_shape, const Operands& operands,
+    const LaunchDimensions& launch_dimensions) {
+  int64_t max_elements = ElementsInShape(output_shape);
+  for (const HloInstruction* operand : operands) {
+    max_elements = std::max(max_elements, ElementsInShape(operand->shape()));
+  }
+  const int64_t num_threads = std::max<int64_t>(
+      1, static_cast<int64_t>(launch_dimensions.launch_bound()));
+  KernelOccupancyHints hints;
+  hints.elements_per_thread =
+      std::max<int64_t>(1, CeilOfRatio(max_elements, num_threads));
+  hints.num_inputs = std::max<int64_t>(1, operands.size());
+  hints.bytes_per_element = LeafElementSizeInBytes(output_shape);
+  return hints;
+}
+
+}  // namespace
+
 GpuPerformanceModel::GpuPerformanceModel(
     const se::DeviceDescription& device_info,
     HloFusionAnalysisCache& fusion_analysis_cache,
-    GpuPerformanceModelCache& gpu_performance_model_cache)
+    GpuPerformanceModelCache& gpu_performance_model_cache,
+    std::optional<OccupancyModelParams> occupancy_params)
     : device_info_(device_info),
       fusion_analysis_cache_(fusion_analysis_cache),
-      gpu_performance_model_cache_(gpu_performance_model_cache) {};
+      gpu_performance_model_cache_(gpu_performance_model_cache),
+      occupancy_params_(occupancy_params) {};
 
 EstimateRunTimeData GpuPerformanceModel::EstimateRunTimeForInstructionImpl(
     const HloInstruction* instr, const GpuHloCostAnalysis* cost_analysis) {
@@ -64,9 +115,17 @@ EstimateRunTimeData GpuPerformanceModel::EstimateRunTimeForInstructionImpl(
       EstimateFusionLaunchDimensions(fusion_analysis);
   int64_t num_blocks = launch_dimensions.num_blocks();
 
-  absl::Duration compute_time =
-      ComputeTime(device_info_, flops, num_blocks,
-                  launch_dimensions.num_threads_per_block());
+  std::optional<OccupancyRunTimeEstimator> occupancy_estimator;
+  if (occupancy_params_.has_value()) {
+    occupancy_estimator.emplace(
+        device_info_,
+        EstimateOccupancy(device_info_, launch_dimensions,
+                          MakeOccupancyHints(instr->shape(), instr->operands(),
+                                             launch_dimensions),
+                          *occupancy_params_),
+        *occupancy_params_);
+    occupancy_estimator->AddCompute(flops);
+  }
 
   CoalescingAnalysis coalescing_analysis =
       CoalescingAnalysis::Create(instr, instr->operands(), fusion_analysis);
@@ -85,15 +144,36 @@ EstimateRunTimeData GpuPerformanceModel::EstimateRunTimeForInstructionImpl(
 
     VLogOperandRead(operand, n_bytes_total, n_bytes_net, coalesced);
 
+    double hbm_bandwidth_utilization_rate =
+        GetCoalescingUtilizationRate(element_type, device_info_, coalesced);
+    if (occupancy_estimator.has_value()) {
+      occupancy_estimator->AddRead(n_bytes_net, n_bytes_total,
+                                   hbm_bandwidth_utilization_rate);
+      continue;
+    }
     read_time += ReadTimeWithDRAMHeuristic(
-        device_info_, num_blocks, n_bytes_net, n_bytes_total,
-        operand->shape().element_type(),
-        GetCoalescingUtilizationRate(element_type, device_info_, coalesced));
+        device_info_, num_blocks, n_bytes_net, n_bytes_total, element_type,
+        hbm_bandwidth_utilization_rate);
   }
 
-  absl::Duration write_time = WriteTime(device_info_, bytes_written);
-  absl::Duration exec_time =
-      CombineComputeAndMemoryAccessTime(compute_time, read_time + write_time);
+  absl::Duration compute_time;
+  absl::Duration write_time;
+  absl::Duration exec_time;
+  if (occupancy_estimator.has_value()) {
+    occupancy_estimator->AddWrite(bytes_written);
+    compute_time = occupancy_estimator->compute_time();
+    read_time = occupancy_estimator->read_time();
+    write_time = occupancy_estimator->write_time();
+    exec_time = occupancy_estimator->exec_time();
+    VLOG(3) << "Occupancy for HLO: " << instr->name() << "\n"
+            << occupancy_estimator->occupancy().ToString();
+  } else {
+    compute_time = ComputeTime(device_info_, flops, num_blocks,
+                               launch_dimensions.num_threads_per_block());
+    write_time = WriteTime(device_info_, bytes_written);
+    exec_time =
+        CombineComputeAndMemoryAccessTime(compute_time, read_time + write_time);
+  }
 
   EstimateRunTimeData runtime_data = {flops,     bytes_read, bytes_written,
                                       read_time, write_time, compute_time,
@@ -148,11 +228,20 @@ absl::Duration GpuPerformanceModel::EstimateRunTimeForFusionImpl(
   int64_t flops = producer_runtime.flops * utilization_by_this_consumer +
                   consumer_runtime.flops;
 
-  absl::Duration compute_time =
-      ComputeTime(device_info_, flops, launch_dimensions.num_blocks(),
-                  launch_dimensions.num_threads_per_block());
-
   auto fusion_operands = fusion_analysis.fusion().GetParameters();
+
+  std::optional<OccupancyRunTimeEstimator> occupancy_estimator;
+  if (occupancy_params_.has_value()) {
+    occupancy_estimator.emplace(
+        device_info_,
+        EstimateOccupancy(device_info_, launch_dimensions,
+                          MakeOccupancyHints(consumer->shape(), fusion_operands,
+                                             launch_dimensions),
+                          *occupancy_params_),
+        *occupancy_params_);
+    occupancy_estimator->AddCompute(flops);
+  }
+
   CoalescingAnalysis coalescing_analysis = CoalescingAnalysis::Create(
       producer, consumer, fusion_operands, fusion_analysis);
 
@@ -171,10 +260,16 @@ absl::Duration GpuPerformanceModel::EstimateRunTimeForFusionImpl(
 
     VLogOperandRead(operand, n_bytes_total, n_bytes_net, coalesced);
 
+    double hbm_bandwidth_utilization_rate =
+        GetCoalescingUtilizationRate(element_type, device_info_, coalesced);
+    if (occupancy_estimator.has_value()) {
+      occupancy_estimator->AddRead(n_bytes_net, n_bytes_total,
+                                   hbm_bandwidth_utilization_rate);
+      continue;
+    }
     read_time += ReadTimeWithDRAMHeuristic(
         device_info_, launch_dimensions.num_blocks(), n_bytes_net,
-        n_bytes_total, operand->shape().element_type(),
-        GetCoalescingUtilizationRate(element_type, device_info_, coalesced));
+        n_bytes_total, element_type, hbm_bandwidth_utilization_rate);
   }
 
   int64_t bytes_written = consumer_runtime.bytes_written;
@@ -188,8 +283,26 @@ absl::Duration GpuPerformanceModel::EstimateRunTimeForFusionImpl(
     write_time += producer_runtime.write_time;
   }
 
-  auto exec_time =
-      CombineComputeAndMemoryAccessTime(compute_time, read_time + write_time);
+  absl::Duration compute_time;
+  absl::Duration exec_time;
+  if (occupancy_estimator.has_value()) {
+    // The write time depends on the fused launch, so it is re-estimated here
+    // rather than taken from the consumer's own estimate.
+    occupancy_estimator->AddWrite(bytes_written);
+    compute_time = occupancy_estimator->compute_time();
+    read_time = occupancy_estimator->read_time();
+    write_time = occupancy_estimator->write_time();
+    exec_time = occupancy_estimator->exec_time();
+    VLOG(3) << "Occupancy for producer-consumer fusion: " << producer->name()
+            << " -> " << consumer->name() << "\n"
+            << occupancy_estimator->occupancy().ToString();
+  } else {
+    compute_time =
+        ComputeTime(device_info_, flops, launch_dimensions.num_blocks(),
+                    launch_dimensions.num_threads_per_block());
+    exec_time =
+        CombineComputeAndMemoryAccessTime(compute_time, read_time + write_time);
+  }
 
   VLOG(3) << "Runtime data for producer-consumer fusion:\n"
           << " producer: " << producer->name() << "\n"

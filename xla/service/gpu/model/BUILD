@@ -323,11 +323,42 @@ xla_cc_test(
 )
 
 cc_library(
+    name = "gpu_occupancy_model",
+    srcs = ["gpu_occupancy_model.cc"],
+    hdrs = ["gpu_occupancy_model.h"],
+    deps = [
+        "//xla:debug_options_flags",
+        "//xla:util",
+        "//xla:xla_proto_cc",
+        "//xla/service/gpu:launch_dimensions",
+        "//xla/stream_executor:device_description",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+xla_cc_test(
+    name = "gpu_occupancy_model_test",
+    srcs = ["gpu_occupancy_model_test.cc"],
+    deps = [
+        ":gpu_occupancy_model",
+        "//xla:xla_proto_cc",
+        "//xla/service/gpu:gpu_device_info_for_tests",
+        "//xla/service/gpu:launch_dimensions",
+        "//xla/stream_executor:device_description",
+        "//xla/tests:xla_internal_test_main",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
     name = "gpu_performance_model_base",
     srcs = ["gpu_performance_model_base.cc"],
     hdrs = ["gpu_performance_model_base.h"],
     deps = [
         ":gpu_hlo_cost_analysis",
+        ":gpu_occupancy_model",
         "//xla:shape_util",
         "//xla:util",
         "//xla:xla_data_proto_cc",
@@ -343,6 +374,7 @@ cc_library(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings:str_format",
@@ -358,6 +390,7 @@ xla_cc_test(
     srcs = ["gpu_performance_model_base_test.cc"],
     deps = [
         ":gpu_hlo_cost_analysis",
+        ":gpu_occupancy_model",
         ":gpu_performance_model_base",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
@@ -366,6 +399,7 @@ xla_cc_test(
         "//xla/service/gpu:backend_configs_cc",
         "//xla/service/gpu:gpu_device_info_for_tests",
         "//xla/service/gpu:hlo_fusion_analysis",
+        "//xla/service/gpu:launch_dimensions",
         "//xla/stream_executor:device_description",
         "//xla/tests:xla_internal_test_main",
         "@com_google_absl//absl/strings",
@@ -383,7 +417,9 @@ cc_library(
         ":coalescing_analysis",
         ":fusion_analysis_cache",
         ":gpu_hlo_cost_analysis",
+        ":gpu_occupancy_model",
         ":gpu_performance_model_base",
+        "//xla:shape_util",
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/ir:hlo",
@@ -408,6 +444,7 @@ xla_cc_test(
         ":fusion_analysis_cache",
         ":gpu_hlo_cost_analysis",
         ":gpu_indexing_performance_model",
+        ":gpu_occupancy_model",
         ":gpu_performance_model",
         ":gpu_performance_model_base",
         "//xla:shape_util",
@@ -440,6 +477,7 @@ cc_library(
         ":fusion_analysis_cache",
         ":gpu_hlo_cost_analysis",
         ":gpu_indexing_performance_model",
+        ":gpu_occupancy_model",
         ":gpu_performance_model",
         ":gpu_performance_model_base",
         "//xla:xla_data_proto_cc",
@@ -573,6 +611,7 @@ cc_library(
         ":fusion_analysis_cache",
         ":gpu_dot_fusion_cost_model",
         ":gpu_hlo_cost_analysis",
+        ":gpu_occupancy_model",
         ":gpu_performance_model_base",
         ":hlo_op_profiles",
         ":triton_emitter_constraints",
@@ -593,6 +632,7 @@ cc_library(
         "//xla/service:instruction_fusion",
         "//xla/service/gpu:hlo_fusion_analysis",
         "//xla/service/gpu:ir_emission_utils",
+        "//xla/service/gpu:launch_dimensions",
         "//xla/service/gpu:mlir_context_pool",
         "//xla/stream_executor:device_description",
         "//xla/tsl/concurrency:executor",

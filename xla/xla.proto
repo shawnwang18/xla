@@ -1994,7 +1994,14 @@ message DebugOptions {
   // their latency profile. Read once per process from XLA_FLAGS.
   optional bool xla_gpu_experimental_throughput_op_profiles = 564;
 
-  // Next id: 565
+  // Estimate fusion run times with the occupancy model: blocks per SM from the
+  // thread, register and shared memory limits, waves of concurrently resident
+  // blocks, an issue rate and compute/memory overlap that grow with resident
+  // warps, and memory bandwidth capped by bytes in flight over latency instead
+  // of by the block count.
+  optional bool xla_gpu_experimental_occupancy_cost_model = 565;
+
+  // Next id: 566
 
   // Extra options to pass to the compilation backend (e.g. LLVM); specific
   // interpretation of these values is left to the backend.

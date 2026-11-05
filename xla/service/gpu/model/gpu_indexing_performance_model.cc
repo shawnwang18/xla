@@ -63,10 +63,12 @@ limitations under the License.
 #include "xla/service/decision.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/ir_emission_utils.h"
+#include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/mlir_context_pool.h"
 #include "xla/service/gpu/model/coalescing_analysis.h"
 #include "xla/service/gpu/model/gpu_dot_fusion_cost_model.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/gpu/model/triton_emitter_constraints.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -575,13 +577,16 @@ int64_t GetShapeSizeRecursive(
   return total_size;
 }
 
+// With `occupancy_params`, run time is estimated with the occupancy model
+// (see gpu_occupancy_model.h); with nullptr, with the default model.
 absl::StatusOr<EstimateRunTimeData> EstimateRunTimeForTiledHloComputationImpl(
     const HloFusionAdaptor& fusion_adaptor,
     const experimental::TiledHloComputation& tiled_hlo_computation,
     const BlockLevelParameters& block_level_parameters,
     const se::DeviceDescription& device_info,
     HloCostAnalysis::ShapeSizeFunction shape_size,
-    absl::FunctionRef<int64_t(const HloInstruction*)> flops_per_element_fn) {
+    absl::FunctionRef<int64_t(const HloInstruction*)> flops_per_element_fn,
+    const OccupancyModelParams* occupancy_params) {
   OperandReadMap n_bytes_total_map;
 
   // Compute time for dot flops is counted separately.
@@ -590,6 +595,9 @@ absl::StatusOr<EstimateRunTimeData> EstimateRunTimeForTiledHloComputationImpl(
   int64_t bytes_read = 0;
   int64_t dot_l2_bytes_read = 0;
   int64_t num_blocks = tiled_hlo_computation.num_output_tiles();
+  // Elements of the largest tile one block touches, for the occupancy model's
+  // estimate of loads per thread.
+  int64_t max_tile_elements = 1;
 
   DotEstimates dot_estimates;
 
@@ -614,6 +622,7 @@ absl::StatusOr<EstimateRunTimeData> EstimateRunTimeForTiledHloComputationImpl(
         if (fusion_adaptor.ContainsInstruction(hlo)) {
           // Number of elements in the tile after padding.
           int64_t padded_tile_size = GetPaddedTileSize(*tile_sizes);
+          max_tile_elements = std::max(max_tile_elements, padded_tile_size);
 
           // Total number of elements computed for this tile across all blocks.
           //
@@ -662,6 +671,10 @@ absl::StatusOr<EstimateRunTimeData> EstimateRunTimeForTiledHloComputationImpl(
              llvm::zip(*tile_sizes, tiled_hlo->hlo()->shape().dimensions())) {
           num_elements *= std::min(tile_size, dimension_size);
         }
+        if (num_blocks_cur_hlo > 0) {
+          max_tile_elements =
+              std::max(max_tile_elements, num_elements / num_blocks_cur_hlo);
+        }
 
         // Tiles of the operands of the fusion contribute to the total memory
         // read time.
@@ -685,55 +698,119 @@ absl::StatusOr<EstimateRunTimeData> EstimateRunTimeForTiledHloComputationImpl(
                           n_bytes_total_map);
       });
 
-  absl::Duration read_time =
-      ComputeReadTime(n_bytes_total_map, device_info, num_blocks, shape_size);
-
   auto roots = tiled_hlo_computation.roots();
   int64_t bytes_written = 0;
-  absl::Duration write_time;
+  // Bytes and bandwidth utilization rate of each root's write.
+  absl::InlinedVector<std::pair<int64_t, double>, 2> root_writes;
   for (auto* root : roots) {
-    int64_t effective_bandwidth =
-        BandwidthUtilizationRateHeuristicForTiledMemoryAccess(*root,
-                                                              device_info) *
-        device_info.memory_bandwidth();
     int64_t bytes_written_for_root =
         GetShapeSizeRecursive(root->hlo()->shape(), shape_size);
-    write_time +=
-        absl::Seconds(1.0 * bytes_written_for_root / effective_bandwidth);
+    root_writes.emplace_back(
+        bytes_written_for_root,
+        BandwidthUtilizationRateHeuristicForTiledMemoryAccess(*root,
+                                                              device_info));
     bytes_written += bytes_written_for_root;
   }
 
-  absl::Duration compute_time =
-      GpuPerformanceModelBase::ComputeTime(
-          device_info, flops, num_blocks,
-          block_level_parameters.num_warps * WarpSize(device_info)) +
-      dot_estimates.compute_time;
-
-  absl::Duration memory_access_time = read_time + write_time;
-  absl::Duration exec_time =
-      GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
-          compute_time, memory_access_time);
-
-  // TODO(b/503201785): This is a hacky way to ensure that the execution time is
-  // at least as long as the dot execution time. But in those cases we are not
-  // accounting for any work in the epilogue or prologue properly. We are
-  // planning to do it in the future but the cost model will need to be
-  // significantly more complex for that.
-  exec_time = std::max(exec_time, dot_estimates.exec_time);
-
-  if (dot_estimates.exec_time > absl::ZeroDuration()) {
+  // With a dot in the fusion, K-loop cache re-reads are modeled by the dot
+  // cost model (`CalculateL2Time`) and the HBM bandwidth is derated for the
+  // dot's access pattern.
+  const bool has_dot = dot_estimates.exec_time > absl::ZeroDuration();
+  double hbm_bandwidth_derate = 1.0;
+  if (has_dot) {
     int64_t total_net_hbm_bytes =
         GetNetBytesRead(n_bytes_total_map, shape_size) + bytes_written;
     float effective_hbm_bandwidth =
         dot_model::GetEffectiveHbmBandwidth(total_net_hbm_bytes, device_info);
-    double hbm_bandwidth_derate = static_cast<double>(effective_hbm_bandwidth) /
-                                  device_info.memory_bandwidth();
-    // Exclude K-loop cache re-reads because `CalculateL2Time` models L2
-    // traffic separately.
+    hbm_bandwidth_derate = static_cast<double>(effective_hbm_bandwidth) /
+                           device_info.memory_bandwidth();
+  }
+
+  const int64_t num_threads_per_block =
+      block_level_parameters.num_warps * WarpSize(device_info);
+  absl::Duration read_time;
+  absl::Duration write_time;
+  absl::Duration compute_time;
+  absl::Duration exec_time;
+  if (occupancy_params == nullptr) {
     read_time =
-        ComputeReadTime(n_bytes_total_map, device_info, num_blocks, shape_size,
-                        /*include_cache_rereads=*/false, hbm_bandwidth_derate);
-    write_time /= hbm_bandwidth_derate;
+        ComputeReadTime(n_bytes_total_map, device_info, num_blocks, shape_size);
+    for (const auto& [bytes_written_for_root, utilization_rate] : root_writes) {
+      int64_t effective_bandwidth =
+          utilization_rate * device_info.memory_bandwidth();
+      write_time +=
+          absl::Seconds(1.0 * bytes_written_for_root / effective_bandwidth);
+    }
+
+    compute_time = GpuPerformanceModelBase::ComputeTime(
+                       device_info, flops, num_blocks, num_threads_per_block) +
+                   dot_estimates.compute_time;
+
+    exec_time = GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
+        compute_time, read_time + write_time);
+
+    // TODO(b/503201785): This is a hacky way to ensure that the execution time
+    // is at least as long as the dot execution time. But in those cases we are
+    // not accounting for any work in the epilogue or prologue properly. We are
+    // planning to do it in the future but the cost model will need to be
+    // significantly more complex for that.
+    exec_time = std::max(exec_time, dot_estimates.exec_time);
+
+    if (has_dot) {
+      // Exclude K-loop cache re-reads because `CalculateL2Time` models L2
+      // traffic separately.
+      read_time = ComputeReadTime(n_bytes_total_map, device_info, num_blocks,
+                                  shape_size, /*include_cache_rereads=*/false,
+                                  hbm_bandwidth_derate);
+      write_time /= hbm_bandwidth_derate;
+    }
+  } else {
+    // Occupancy model: the same flops, reads and writes, priced per wave of
+    // resident blocks. The Triton emitter runs `num_warps` warps per tile.
+    LaunchDimensions launch_dimensions(num_blocks, num_threads_per_block);
+    KernelOccupancyHints hints;
+    hints.registers_per_thread = dot_estimates.registers_per_thread;
+    hints.shared_memory_per_block_bytes =
+        dot_estimates.shared_memory_per_block_bytes;
+    hints.elements_per_thread = std::max<int64_t>(
+        1, CeilOfRatio(max_tile_elements, num_threads_per_block));
+    hints.num_inputs =
+        std::max<int64_t>(1, static_cast<int64_t>(n_bytes_total_map.size()));
+    if (roots.begin() != roots.end() &&
+        (*roots.begin())->hlo()->shape().IsArray()) {
+      hints.bytes_per_element = ShapeUtil::ByteSizeOfPrimitiveType(
+          (*roots.begin())->hlo()->shape().element_type());
+    }
+    OccupancyRunTimeEstimator estimator(
+        device_info,
+        EstimateOccupancy(device_info, launch_dimensions, hints,
+                          *occupancy_params),
+        *occupancy_params);
+    estimator.AddCompute(flops);
+    estimator.AddComputeTime(dot_estimates.compute_time);
+    // Each read is converted to a fixed-point `absl::Duration` before it is
+    // added, so map iteration order does not affect the result.
+    // NOLINTNEXTLINE(*-custom-deterministic-iteration-order)
+    for (const auto& [hlo, operand_read_info] : n_bytes_total_map) {
+      int64_t dram_bytes = GetDramBytesRead(hlo, operand_read_info, shape_size);
+      // With a dot, K-loop cache re-reads are modeled by `CalculateL2Time`.
+      int64_t total_bytes =
+          has_dot ? dram_bytes : operand_read_info.total_bytes_read;
+      estimator.AddRead(dram_bytes, total_bytes,
+                        operand_read_info.read_bandwidth_utilization_rate *
+                            hbm_bandwidth_derate);
+    }
+    for (const auto& [bytes_written_for_root, utilization_rate] : root_writes) {
+      estimator.AddWrite(bytes_written_for_root,
+                         utilization_rate * hbm_bandwidth_derate);
+    }
+    compute_time = estimator.compute_time();
+    read_time = estimator.read_time();
+    write_time = estimator.write_time();
+    // As above, the fusion takes at least as long as its dot.
+    exec_time = std::max(estimator.exec_time(), dot_estimates.exec_time);
+    VLOG(3) << "Occupancy for tiled fusion: "
+            << estimator.occupancy().ToString();
   }
 
   return EstimateRunTimeData{
@@ -836,7 +913,8 @@ absl::StatusOr<std::optional<TiledRunTimeData>> EstimateTiledRunTimeDataImpl(
     const experimental::TiledHloComputation& tiled_hlo_computation,
     const se::DeviceDescription& device_info,
     HloCostAnalysis::ShapeSizeFunction shape_size,
-    absl::FunctionRef<int64_t(const HloInstruction*)> flops_per_element_fn) {
+    absl::FunctionRef<int64_t(const HloInstruction*)> flops_per_element_fn,
+    const OccupancyModelParams* occupancy_params) {
   BlockLevelParameters block_level_parameters =
       BlockLevelParametersForTiling(tiled_hlo_computation);
   block_level_parameters.num_warps =
@@ -847,7 +925,7 @@ absl::StatusOr<std::optional<TiledRunTimeData>> EstimateTiledRunTimeDataImpl(
       EstimateRunTimeData estimate_run_time_data,
       EstimateRunTimeForTiledHloComputationImpl(
           fusion_adaptor, tiled_hlo_computation, block_level_parameters,
-          device_info, shape_size, flops_per_element_fn));
+          device_info, shape_size, flops_per_element_fn, occupancy_params));
 
   // Skip tilings with infinite runtime (e.g., due to register spilling).
   if (estimate_run_time_data.exec_time == absl::InfiniteDuration()) {
@@ -966,7 +1044,8 @@ absl::StatusOr<std::optional<TiledRunTimeData>> EvaluateCandidate(
     MlirContextPool* mlir_context_pool,
     const se::DeviceDescription& device_info,
     HloCostAnalysis::ShapeSizeFunction shape_size,
-    absl::FunctionRef<int64_t(const HloInstruction*)> flops_fn) {
+    absl::FunctionRef<int64_t(const HloInstruction*)> flops_fn,
+    const OccupancyModelParams* occupancy_params) {
   // Cloning is faster than calling TilingSpace::Create() for each tiling
   // candidate.
   ABSL_ASSIGN_OR_RETURN(
@@ -995,10 +1074,10 @@ absl::StatusOr<std::optional<TiledRunTimeData>> EvaluateCandidate(
     return std::nullopt;
   }
 
-  ABSL_ASSIGN_OR_RETURN(
-      std::optional<TiledRunTimeData> tiled_run_time_data,
-      EstimateTiledRunTimeDataImpl(fusion_adaptor, *tiled_computation,
-                                   device_info, shape_size, flops_fn));
+  ABSL_ASSIGN_OR_RETURN(std::optional<TiledRunTimeData> tiled_run_time_data,
+                        EstimateTiledRunTimeDataImpl(
+                            fusion_adaptor, *tiled_computation, device_info,
+                            shape_size, flops_fn, occupancy_params));
 
   if (tiled_run_time_data.has_value()) {
     VLOG(2) << "Accepted tile sizes ["
@@ -1019,7 +1098,8 @@ tsl::Future<TopKTiledRunTimeDataOrError> TryFindTopKBestTilingsWithTilingSpace(
     std::function<int64_t(const HloInstruction*)> flops_fn,
     mlir::MLIRContext* mlir_context, MlirContextPool* mlir_context_pool,
     const se::DeviceDescription& device_info,
-    HloCostAnalysis::ShapeSizeFunction shape_size) {
+    HloCostAnalysis::ShapeSizeFunction shape_size,
+    const OccupancyModelParams* occupancy_params) {
   CHECK(executor == &tsl::InlineExecutor::Instance() ||
         mlir_context_pool != nullptr || mlir_context->isMultithreadingEnabled())
       << "Concurrent tiling evaluation requires either an MlirContextPool or "
@@ -1082,11 +1162,12 @@ tsl::Future<TopKTiledRunTimeDataOrError> TryFindTopKBestTilingsWithTilingSpace(
     candidate_futures.push_back(tsl::MakeFutureOn(
         *executor,
         [base, &fusion_adaptor, device_info = &device_info, shape_size,
-         flops_fn, mlir_context_pool,
+         flops_fn, mlir_context_pool, occupancy_params,
          padded_tile_sizes = std::move(padded_tile_sizes)]() mutable {
           return EvaluateCandidate(fusion_adaptor, std::move(base),
                                    padded_tile_sizes, mlir_context_pool,
-                                   *device_info, shape_size, flops_fn);
+                                   *device_info, shape_size, flops_fn,
+                                   occupancy_params);
         }));
   }
 
@@ -1196,7 +1277,8 @@ GpuPerformanceModelWithIndexingAnalysis::EstimateRunTimeForTiledHloComputation(
   return EstimateRunTimeForTiledHloComputationImpl(
       fusion_adaptor, tiled_hlo_computation, block_level_parameters,
       *device_info_, shape_size_,
-      [this](const HloInstruction* hlo) { return FlopsPerElement(hlo); });
+      [this](const HloInstruction* hlo) { return FlopsPerElement(hlo); },
+      occupancy_params_ptr());
 }
 
 absl::StatusOr<EstimateRunTimeData>
@@ -1223,7 +1305,8 @@ GpuPerformanceModelWithIndexingAnalysis::EstimateRunTimeForTiledFusion(
   return EstimateRunTimeForTiledHloComputationImpl(
       fusion_adaptor, tiled_hlo_computation, block_level_parameters,
       *device_info_, shape_size_,
-      [&](const HloInstruction* hlo) { return FlopsPerElement(hlo); });
+      [&](const HloInstruction* hlo) { return FlopsPerElement(hlo); },
+      occupancy_params_ptr());
 }
 
 absl::StatusOr<EstimateRunTimeData>
@@ -1334,7 +1417,7 @@ GpuPerformanceModelWithIndexingAnalysis::TryFindTopKBestTilingsForFusionAsync(
 
   return TryFindTopKBestTilingsWithTilingSpace(
       fusion_adaptor, top_k, executor, flops_fn, mlir_context_,
-      mlir_context_pool_, *device_info_, shape_size_);
+      mlir_context_pool_, *device_info_, shape_size_, occupancy_params_ptr());
 }
 
 tsl::Future<TiledRunTimeDataOrError>

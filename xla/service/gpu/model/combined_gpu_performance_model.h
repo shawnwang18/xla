@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_MODEL_COMBINED_GPU_PERFORMANCE_MODEL_H_
 #define XLA_SERVICE_GPU_MODEL_COMBINED_GPU_PERFORMANCE_MODEL_H_
 
+#include <optional>
+
 #include "absl/base/attributes.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
@@ -26,6 +28,7 @@ limitations under the License.
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/gpu/model/gpu_indexing_performance_model.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -52,7 +55,9 @@ class CombinedGpuPerformanceModel : public GpuPerformanceModelBase {
       mlir::MLIRContext& mlir_context ABSL_ATTRIBUTE_LIFETIME_BOUND,
       HloCostAnalysis::ShapeSizeFunction shape_size,
       bool enable_same_shape_multi_output_fusion,
-      MlirContextPool* mlir_context_pool = nullptr);
+      MlirContextPool* mlir_context_pool = nullptr,
+      std::optional<OccupancyModelParams> occupancy_params =
+          OccupancyModelParamsFromFlags());
 
   // Returns runtime data analysis results of a single instruction.
   //

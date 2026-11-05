@@ -38,6 +38,7 @@ limitations under the License.
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
@@ -400,8 +401,155 @@ absl::Duration GpuPerformanceModelBase::ComputeTime(
 /*static*/
 absl::Duration GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
     absl::Duration compute_time, absl::Duration memory_access_time) {
+  return CombineComputeAndMemoryAccessTime(compute_time, memory_access_time,
+                                           kMemoryComputeParallelism);
+}
+
+/*static*/
+absl::Duration GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
+    absl::Duration compute_time, absl::Duration memory_access_time,
+    double memory_compute_parallelism) {
   return compute_time + memory_access_time -
-         std::min(compute_time, memory_access_time) * kMemoryComputeParallelism;
+         std::min(compute_time, memory_access_time) *
+             memory_compute_parallelism;
+}
+
+OccupancyRunTimeEstimator::OccupancyRunTimeEstimator(
+    const se::DeviceDescription& device_info,
+    const OccupancyEstimate& occupancy, const OccupancyModelParams& params)
+    : device_info_(device_info), occupancy_(occupancy), params_(params) {
+  occupancy_.ForEachWave([&](const OccupancyWave& wave, int64_t count) {
+    waves_.push_back(WaveTimes{wave, count});
+  });
+}
+
+void OccupancyRunTimeEstimator::AddCompute(int64_t flops) {
+  if (flops <= 0) {
+    return;
+  }
+  // Peak issue rate of one SM in flops per ns, counting an FMA as 2.
+  const double peak_flops_per_ns_per_sm =
+      device_info_.fpus_per_core() * device_info_.clock_rate_ghz() * 2.0;
+  const double flops_per_block =
+      static_cast<double>(flops) / static_cast<double>(occupancy_.num_blocks);
+  for (WaveTimes& wave_times : waves_) {
+    const OccupancyWave& wave = wave_times.wave;
+    const double flops_per_ns =
+        peak_flops_per_ns_per_sm *
+        IssueRateFraction(wave.warps_on_busiest_sm, params_);
+    wave_times.compute += absl::Nanoseconds(wave.blocks_on_busiest_sm *
+                                            flops_per_block / flops_per_ns);
+  }
+}
+
+void OccupancyRunTimeEstimator::AddComputeTime(absl::Duration compute_time) {
+  for (WaveTimes& wave_times : waves_) {
+    wave_times.compute += compute_time * wave_times.wave.fraction_of_kernel;
+  }
+}
+
+double OccupancyRunTimeEstimator::DramBandwidth(
+    const OccupancyWave& wave, double hbm_bandwidth_utilization_rate) const {
+  const double peak = device_info_.memory_bandwidth() *
+                      hbm_bandwidth_utilization_rate *
+                      params_.achievable_bandwidth_fraction;
+  const double in_flight = LittlesLawBandwidth(
+      wave.total_warps, occupancy_.requests_in_flight_per_warp,
+      occupancy_.bytes_per_request, params_.dram_latency);
+  return std::max(1.0, std::min(peak, in_flight));
+}
+
+double OccupancyRunTimeEstimator::CacheBandwidth(
+    const OccupancyWave& wave, int64_t n_bytes_net,
+    double hbm_bandwidth_utilization_rate) const {
+  if (n_bytes_net >= device_info_.l2_cache_size()) {
+    return DramBandwidth(wave, hbm_bandwidth_utilization_rate);
+  }
+  double peak = device_info_.memory_bandwidth() *
+                GpuPerformanceModelBase::kL2CacheSpeedup;
+  if (n_bytes_net <
+      device_info_.l1_cache_size_per_SM() * device_info_.core_count()) {
+    peak *= GpuPerformanceModelBase::kL1CacheSpeedup;
+  }
+  const double in_flight = LittlesLawBandwidth(
+      wave.total_warps, occupancy_.requests_in_flight_per_warp,
+      occupancy_.bytes_per_request, params_.l2_latency);
+  return std::max(1.0, std::min(peak, in_flight));
+}
+
+void OccupancyRunTimeEstimator::AddRead(int64_t n_bytes_net,
+                                        int64_t n_bytes_total,
+                                        double hbm_bandwidth_utilization_rate) {
+  // Same split as ReadTimeWithDRAMHeuristic: n_bytes_net > n_bytes_total can
+  // happen for shared operands.
+  const int64_t n_bytes_read_dram = std::min(n_bytes_net, n_bytes_total);
+  const int64_t n_bytes_read_cache = n_bytes_total - n_bytes_read_dram;
+  for (WaveTimes& wave_times : waves_) {
+    const OccupancyWave& wave = wave_times.wave;
+    wave_times.read +=
+        absl::Seconds(n_bytes_read_dram * wave.fraction_of_kernel /
+                      DramBandwidth(wave, hbm_bandwidth_utilization_rate));
+    if (n_bytes_read_cache > 0) {
+      wave_times.read += absl::Seconds(
+          n_bytes_read_cache * wave.fraction_of_kernel /
+          CacheBandwidth(wave, n_bytes_net, hbm_bandwidth_utilization_rate));
+    }
+  }
+}
+
+void OccupancyRunTimeEstimator::AddWrite(
+    int64_t bytes_written, double hbm_bandwidth_utilization_rate) {
+  for (WaveTimes& wave_times : waves_) {
+    const OccupancyWave& wave = wave_times.wave;
+    wave_times.write +=
+        absl::Seconds(bytes_written * wave.fraction_of_kernel /
+                      DramBandwidth(wave, hbm_bandwidth_utilization_rate));
+  }
+}
+
+absl::Duration OccupancyRunTimeEstimator::compute_time() const {
+  absl::Duration total;
+  for (const WaveTimes& wave_times : waves_) {
+    total += wave_times.compute * wave_times.count;
+  }
+  return total;
+}
+
+absl::Duration OccupancyRunTimeEstimator::read_time() const {
+  absl::Duration total;
+  for (const WaveTimes& wave_times : waves_) {
+    total += wave_times.read * wave_times.count;
+  }
+  return total;
+}
+
+absl::Duration OccupancyRunTimeEstimator::write_time() const {
+  absl::Duration total;
+  for (const WaveTimes& wave_times : waves_) {
+    total += wave_times.write * wave_times.count;
+  }
+  return total;
+}
+
+absl::Duration OccupancyRunTimeEstimator::exec_time() const {
+  absl::Duration total;
+  for (const WaveTimes& wave_times : waves_) {
+    absl::Duration memory_time = wave_times.read + wave_times.write;
+    if (memory_time > absl::ZeroDuration()) {
+      // A wave cannot finish before its dependent round trips have returned,
+      // however little data they move.
+      memory_time =
+          std::max(memory_time, params_.dram_latency *
+                                    occupancy_.dependent_round_trips_per_block);
+    }
+    const double parallelism =
+        GpuPerformanceModelBase::kMemoryComputeParallelism *
+        OverlapFraction(wave_times.wave.warps_on_busiest_sm, params_);
+    total += GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
+                 wave_times.compute, memory_time, parallelism) *
+             wave_times.count;
+  }
+  return total;
 }
 
 /*static*/

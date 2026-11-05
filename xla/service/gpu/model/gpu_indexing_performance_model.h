@@ -17,6 +17,7 @@ limitations under the License.
 #define XLA_SERVICE_GPU_MODEL_GPU_INDEXING_PERFORMANCE_MODEL_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -34,6 +35,7 @@ limitations under the License.
 #include "xla/service/gpu/mlir_context_pool.h"
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/gpu/model/hlo_op_profiles.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -70,13 +72,18 @@ using TopKTiledRunTimeDataOrError =
 // of compute and memory access time.
 class GpuPerformanceModelWithIndexingAnalysis : public GpuPerformanceModelBase {
  public:
+  // With `occupancy_params`, tiled fusions are estimated with the occupancy
+  // model (see gpu_occupancy_model.h); with nullopt, with the default model.
+  // The default follows the process-wide flags.
   explicit GpuPerformanceModelWithIndexingAnalysis(
       const se::DeviceDescription* device_info,
       HloFusionAnalysisCache* fusion_analysis_cache,
       HloCostAnalysis::ShapeSizeFunction shape_size,
       mlir::MLIRContext* mlir_context,
       bool enable_same_shape_multi_output_fusion,
-      MlirContextPool* mlir_context_pool = nullptr)
+      MlirContextPool* mlir_context_pool = nullptr,
+      std::optional<OccupancyModelParams> occupancy_params =
+          OccupancyModelParamsFromFlags())
       : hlo_op_profile_(&HloOpProfiles::Singleton().GetProfile(*device_info)),
         device_info_(device_info),
         fusion_analysis_cache_(fusion_analysis_cache),
@@ -90,7 +97,18 @@ class GpuPerformanceModelWithIndexingAnalysis : public GpuPerformanceModelBase {
         mlir_context_(mlir_context),
         mlir_context_pool_(mlir_context_pool),
         enable_same_shape_multi_output_fusion_(
-            enable_same_shape_multi_output_fusion) {}
+            enable_same_shape_multi_output_fusion),
+        occupancy_params_(occupancy_params) {}
+
+  // Selects the occupancy model (or, with nullopt, the default model) for
+  // estimates made after this call.
+  void set_occupancy_model_params(
+      std::optional<OccupancyModelParams> occupancy_params) {
+    occupancy_params_ = occupancy_params;
+  }
+  const std::optional<OccupancyModelParams>& occupancy_model_params() const {
+    return occupancy_params_;
+  }
 
   // Returns the number of warps for the given tiled HLO computation.
   static int64_t EstimateNumWarps(
@@ -159,6 +177,11 @@ class GpuPerformanceModelWithIndexingAnalysis : public GpuPerformanceModelBase {
   mlir::MLIRContext* mlir_context_;
   MlirContextPool* mlir_context_pool_;
   bool enable_same_shape_multi_output_fusion_;
+  std::optional<OccupancyModelParams> occupancy_params_;
+
+  const OccupancyModelParams* occupancy_params_ptr() const {
+    return occupancy_params_.has_value() ? &*occupancy_params_ : nullptr;
+  }
 };
 
 namespace internal {

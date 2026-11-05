@@ -32,7 +32,9 @@ limitations under the License.
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/hlo_fusion_analysis.h"
+#include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/xla_data.pb.h"
 
@@ -452,6 +454,118 @@ ENTRY entry_computation {
   EXPECT_TRUE(cache.ContainsConsumers(*producer));
   cache.Invalidate(*producer);
   EXPECT_FALSE(cache.ContainsConsumers(*producer));
+}
+
+// The occupancy model on an H100 SXM, with the kernel used throughout the
+// model's design notes: 16 MiB of f32 read from one input, four elements per
+// thread, so each warp keeps four 128-byte requests in flight.
+class OccupancyRunTimeEstimatorTest : public ::testing::Test {
+ protected:
+  static constexpr int64_t kBytes = int64_t{16} << 20;
+
+  se::DeviceDescription device_info_{TestGpuDeviceInfo::H100SXMDeviceInfo()};
+  OccupancyModelParams params_;
+
+  OccupancyRunTimeEstimator MakeEstimator(int64_t num_blocks,
+                                          int64_t threads_per_block,
+                                          KernelOccupancyHints hints = {
+                                              .elements_per_thread = 4}) {
+    return OccupancyRunTimeEstimator(
+        device_info_,
+        EstimateOccupancy(device_info_,
+                          LaunchDimensions(num_blocks, threads_per_block),
+                          hints, params_),
+        params_);
+  }
+
+  double ReadMicros(int64_t num_blocks, int64_t threads_per_block,
+                    KernelOccupancyHints hints = {.elements_per_thread = 4}) {
+    OccupancyRunTimeEstimator estimator =
+        MakeEstimator(num_blocks, threads_per_block, hints);
+    estimator.AddRead(kBytes, kBytes, /*hbm_bandwidth_utilization_rate=*/1.0);
+    return absl::ToDoubleMicroseconds(estimator.read_time());
+  }
+};
+
+TEST_F(OccupancyRunTimeEstimatorTest, NarrowBlocksGetLittleBandwidth) {
+  // The default model credits any launch of 53 or more blocks the full HBM
+  // bandwidth, whatever the block size.
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(
+                  GpuPerformanceModelBase::ReadTimeWithDRAMHeuristic(
+                      device_info_, /*num_blocks=*/53, kBytes, kBytes, F32,
+                      /*hbm_bandwidth_utilization_rate=*/1.0)),
+              5.0, 0.1);
+
+  // 53 one-warp blocks keep 27 KB in flight: about 45 GB/s.
+  EXPECT_NEAR(ReadMicros(53, 32), 371, 4);
+  // 53 blocks of 32 warps keep 868 KB in flight: about 1,450 GB/s.
+  EXPECT_NEAR(ReadMicros(53, 1024), 11.6, 0.2);
+  // 32 warps on a single SM: about 27 GB/s.
+  EXPECT_NEAR(ReadMicros(1, 1024), 614, 6);
+}
+
+TEST_F(OccupancyRunTimeEstimatorTest, TrailingWaveCostsNearlyAFullWave) {
+  // 1024 threads at 64 registers use the whole register file: one block per
+  // SM, so 132 blocks fill the chip exactly and saturate 90% of peak.
+  KernelOccupancyHints hints{.registers_per_thread = 64,
+                             .elements_per_thread = 4};
+  EXPECT_NEAR(ReadMicros(132, 1024, hints), 5.6, 0.1);
+  // The 133rd block runs alone in a second wave at one SM's bandwidth.
+  EXPECT_NEAR(ReadMicros(133, 1024, hints), 10.1, 0.2);
+}
+
+TEST_F(OccupancyRunTimeEstimatorTest, SmallBlocksPackWithoutACliff) {
+  // Sixteen 128-thread blocks fit per SM, so 133 blocks are still one wave.
+  double t_132 = ReadMicros(132, 128);
+  double t_133 = ReadMicros(133, 128);
+  EXPECT_NEAR(t_132, 37.2, 0.5);
+  EXPECT_NEAR(t_133, t_132, 0.5);
+}
+
+TEST_F(OccupancyRunTimeEstimatorTest, IssueRateFollowsResidentWarps) {
+  constexpr int64_t kFlopsPerBlock = 41984;
+  // 2112 blocks of 128 threads: 16 per SM, 64 warps, full issue rate.
+  OccupancyRunTimeEstimator full = MakeEstimator(2112, 128);
+  full.AddCompute(2112 * kFlopsPerBlock);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(full.compute_time()), 1.33, 0.01);
+
+  // 132 one-warp blocks: one warp per SM, a sixteenth of the issue rate, so
+  // the same time for a sixteenth of the work.
+  OccupancyRunTimeEstimator narrow = MakeEstimator(132, 32);
+  narrow.AddCompute(132 * kFlopsPerBlock);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(narrow.compute_time()), 1.33, 0.01);
+
+  // The default model credits a 32-thread block a quarter of the SM.
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(GpuPerformanceModelBase::ComputeTime(
+                  device_info_, 132 * kFlopsPerBlock, /*num_blocks=*/132,
+                  /*num_threads_per_block=*/32)),
+              0.33, 0.01);
+}
+
+TEST_F(OccupancyRunTimeEstimatorTest, OverlapFollowsResidentWarps) {
+  const absl::Duration ten_us = absl::Microseconds(10);
+  double one_warp = GpuPerformanceModelBase::kMemoryComputeParallelism *
+                    OverlapFraction(1, params_);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(
+                  GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
+                      ten_us, ten_us, one_warp)),
+              19.4, 0.1);
+  double many_warps = GpuPerformanceModelBase::kMemoryComputeParallelism *
+                      OverlapFraction(32, params_);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(
+                  GpuPerformanceModelBase::CombineComputeAndMemoryAccessTime(
+                      ten_us, ten_us, many_warps)),
+              10.5, 0.1);
+}
+
+TEST_F(OccupancyRunTimeEstimatorTest, WaveTakesAtLeastItsDependentRoundTrips) {
+  // 64 loads per thread with 8 in flight: 8 round trips of 600 ns, however
+  // few bytes they move.
+  OccupancyRunTimeEstimator estimator =
+      MakeEstimator(1, 128, {.elements_per_thread = 64});
+  estimator.AddRead(1024, 1024, /*hbm_bandwidth_utilization_rate=*/1.0);
+  EXPECT_LT(absl::ToDoubleMicroseconds(estimator.read_time()), 1.0);
+  EXPECT_NEAR(absl::ToDoubleMicroseconds(estimator.exec_time()), 4.8, 0.01);
 }
 
 }  // namespace

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -33,6 +34,7 @@ limitations under the License.
 #include "xla/service/gpu/hlo_fusion_analysis.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
+#include "xla/service/gpu/model/gpu_occupancy_model.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/xla_data.pb.h"
 
@@ -267,6 +269,12 @@ class GpuPerformanceModelBase {
   static absl::Duration CombineComputeAndMemoryAccessTime(
       absl::Duration compute_time, absl::Duration memory_access_time);
 
+  // Like above, with an explicit parallelism factor in [0, 1]: 1 means the run
+  // time is the maximum of both times, 0 means their sum.
+  static absl::Duration CombineComputeAndMemoryAccessTime(
+      absl::Duration compute_time, absl::Duration memory_access_time,
+      double memory_compute_parallelism);
+
   // Logs estimates for the operand read if VLOG is enabled.
   static void VLogOperandRead(const HloInstruction* operand,
                               int64_t n_bytes_total, int64_t n_bytes_net,
@@ -276,6 +284,78 @@ class GpuPerformanceModelBase {
   static ReificationCost MakeReificationCostFromRuntime(
       const EstimateRunTimeData& data, const se::DeviceDescription& device_info,
       std::optional<absl::string_view> name = std::nullopt);
+};
+
+// Estimates the run time of one kernel under the occupancy model (see
+// gpu_occupancy_model.h). Compute and memory times are accumulated and
+// combined per wave, so that a nearly empty trailing wave is charged what a
+// nearly empty chip achieves rather than a share of the full-chip rate.
+//
+// Compared to the static functions of GpuPerformanceModelBase:
+//   - compute runs at the SM's peak issue rate scaled by IssueRateFraction of
+//     the warps resident on the busiest SM, instead of
+//     min(threads_per_block, fpus_per_core) lanes;
+//   - memory bandwidth is the achievable peak capped by Little's law on the
+//     warps resident on the chip, instead of 32 bytes per clock per block;
+//   - compute and memory overlap by kMemoryComputeParallelism scaled by
+//     OverlapFraction of the resident warps, instead of a constant;
+//   - a wave takes at least its dependent memory round trips.
+class OccupancyRunTimeEstimator {
+ public:
+  OccupancyRunTimeEstimator(const se::DeviceDescription& device_info,
+                            const OccupancyEstimate& occupancy,
+                            const OccupancyModelParams& params);
+
+  // Adds `flops` of arithmetic, spread evenly over the kernel's blocks.
+  void AddCompute(int64_t flops);
+
+  // Adds compute time estimated elsewhere (e.g. by the dot cost model), spread
+  // over the waves in proportion to their share of the kernel.
+  void AddComputeTime(absl::Duration compute_time);
+
+  // Adds a read of one operand. Same semantics as ReadTimeWithDRAMHeuristic:
+  // the first `n_bytes_net` bytes come from DRAM, re-reads may hit cache.
+  void AddRead(int64_t n_bytes_net, int64_t n_bytes_total,
+               double hbm_bandwidth_utilization_rate);
+
+  // Adds a write of `bytes_written` bytes to DRAM.
+  void AddWrite(int64_t bytes_written,
+                double hbm_bandwidth_utilization_rate = 1.0);
+
+  absl::Duration compute_time() const;
+  absl::Duration read_time() const;
+  absl::Duration write_time() const;
+
+  // Per wave, compute and memory time combined with the wave's overlap factor
+  // and bounded below by the wave's dependent round trips; summed over waves.
+  absl::Duration exec_time() const;
+
+  const OccupancyEstimate& occupancy() const { return occupancy_; }
+
+ private:
+  struct WaveTimes {
+    OccupancyWave wave;
+    int64_t count = 0;
+    absl::Duration compute;
+    absl::Duration read;
+    absl::Duration write;
+  };
+
+  // Bandwidth in bytes per second that `wave` sustains from DRAM: the
+  // achievable peak scaled by the utilization rate, capped by Little's law.
+  double DramBandwidth(const OccupancyWave& wave,
+                       double hbm_bandwidth_utilization_rate) const;
+
+  // Bandwidth for re-reads of a buffer of `n_bytes_net` bytes: the cache
+  // speedups of ReadTimeWithDRAMHeuristic when the buffer fits, capped by
+  // Little's law with the L2 latency; DRAM bandwidth otherwise.
+  double CacheBandwidth(const OccupancyWave& wave, int64_t n_bytes_net,
+                        double hbm_bandwidth_utilization_rate) const;
+
+  const se::DeviceDescription& device_info_;
+  OccupancyEstimate occupancy_;
+  OccupancyModelParams params_;
+  absl::InlinedVector<WaveTimes, 2> waves_;
 };
 
 // Given an element type and whether the read is coalesced, returns the
