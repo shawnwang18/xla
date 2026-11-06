@@ -23,7 +23,6 @@ limitations under the License.
 
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
-#include "xla/debug_options_flags.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
@@ -34,17 +33,6 @@ namespace xla::gpu {
 std::optional<OccupancyModelParams> OccupancyModelParamsFromDebugOptions(
     const DebugOptions& debug_options) {
   if (!debug_options.xla_gpu_experimental_occupancy_cost_model()) {
-    return std::nullopt;
-  }
-  return OccupancyModelParams{};
-}
-
-std::optional<OccupancyModelParams> OccupancyModelParamsFromFlags() {
-  // Read once: like the op profile selection in HloOpProfiles::Singleton(),
-  // the flag selects the model for every compilation in the process.
-  static const bool enabled =
-      GetDebugOptionsFromFlags().xla_gpu_experimental_occupancy_cost_model();
-  if (!enabled) {
     return std::nullopt;
   }
   return OccupancyModelParams{};

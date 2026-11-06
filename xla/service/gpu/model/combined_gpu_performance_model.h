@@ -56,8 +56,7 @@ class CombinedGpuPerformanceModel : public GpuPerformanceModelBase {
       HloCostAnalysis::ShapeSizeFunction shape_size,
       bool enable_same_shape_multi_output_fusion,
       MlirContextPool* mlir_context_pool = nullptr,
-      std::optional<OccupancyModelParams> occupancy_params =
-          OccupancyModelParamsFromFlags());
+      std::optional<OccupancyModelParams> occupancy_params = std::nullopt);
 
   // Returns runtime data analysis results of a single instruction.
   //

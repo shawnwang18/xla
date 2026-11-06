@@ -73,8 +73,8 @@ using TopKTiledRunTimeDataOrError =
 class GpuPerformanceModelWithIndexingAnalysis : public GpuPerformanceModelBase {
  public:
   // With `occupancy_params`, tiled fusions are estimated with the occupancy
-  // model (see gpu_occupancy_model.h); with nullopt, with the default model.
-  // The default follows the process-wide flags.
+  // model (see gpu_occupancy_model.h); with nullopt, the default, with the
+  // default model. Passes opt in explicitly from the module's debug options.
   explicit GpuPerformanceModelWithIndexingAnalysis(
       const se::DeviceDescription* device_info,
       HloFusionAnalysisCache* fusion_analysis_cache,
@@ -82,8 +82,7 @@ class GpuPerformanceModelWithIndexingAnalysis : public GpuPerformanceModelBase {
       mlir::MLIRContext* mlir_context,
       bool enable_same_shape_multi_output_fusion,
       MlirContextPool* mlir_context_pool = nullptr,
-      std::optional<OccupancyModelParams> occupancy_params =
-          OccupancyModelParamsFromFlags())
+      std::optional<OccupancyModelParams> occupancy_params = std::nullopt)
       : hlo_op_profile_(&HloOpProfiles::Singleton().GetProfile(*device_info)),
         device_info_(device_info),
         fusion_analysis_cache_(fusion_analysis_cache),

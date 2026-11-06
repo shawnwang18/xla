@@ -37,13 +37,14 @@ class GpuPerformanceModel : public GpuPerformanceModelBase {
   // Lifetime to all references to this constructor must live at least as long
   //
   // With `occupancy_params`, kernels are estimated with the occupancy model
-  // (see gpu_occupancy_model.h); with nullopt, with the default model. The
-  // default follows the process-wide flags.
+  // (see gpu_occupancy_model.h); with nullopt, the default, with the default
+  // model. Passes opt in explicitly, normally with
+  // OccupancyModelParamsFromDebugOptions(module.config().debug_options()).
   GpuPerformanceModel(const se::DeviceDescription& device_info,
                       HloFusionAnalysisCache& fusion_analysis_cache,
                       GpuPerformanceModelCache& gpu_performance_model_cache,
                       std::optional<OccupancyModelParams> occupancy_params =
-                          OccupancyModelParamsFromFlags());
+                          std::nullopt);
 
   // Selects the occupancy model (or, with nullopt, the default model) for
   // estimates made after this call. Does not invalidate cached estimates.
@@ -107,8 +108,7 @@ class GpuPerformanceModelOwning {
  public:
   explicit GpuPerformanceModelOwning(
       const se::DeviceDescription& device_info,
-      std::optional<OccupancyModelParams> occupancy_params =
-          OccupancyModelParamsFromFlags())
+      std::optional<OccupancyModelParams> occupancy_params = std::nullopt)
       : fusion_analysis_cache_(device_info),
         gpu_performance_model_(std::make_unique<GpuPerformanceModel>(
             device_info, fusion_analysis_cache_, gpu_performance_model_cache_,

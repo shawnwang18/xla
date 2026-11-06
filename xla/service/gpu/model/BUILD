@@ -327,7 +327,6 @@ cc_library(
     srcs = ["gpu_occupancy_model.cc"],
     hdrs = ["gpu_occupancy_model.h"],
     deps = [
-        "//xla:debug_options_flags",
         "//xla:util",
         "//xla:xla_proto_cc",
         "//xla/service/gpu:launch_dimensions",

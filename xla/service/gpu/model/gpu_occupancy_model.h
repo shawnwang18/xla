@@ -72,14 +72,11 @@ struct OccupancyModelParams {
 };
 
 // Returns the occupancy model parameters selected by `debug_options`, or
-// nullopt if the occupancy model is disabled.
+// nullopt if the occupancy model is disabled. Passes that want the occupancy
+// model pass the result to the performance model explicitly; the models
+// default to nullopt, so the flag reaches only passes that opt in.
 std::optional<OccupancyModelParams> OccupancyModelParamsFromDebugOptions(
     const DebugOptions& debug_options);
-
-// Like above, but reads the process-wide flags (XLA_FLAGS) once per process.
-// Used as the default by the performance models so that every consumer in a
-// process selects the same model.
-std::optional<OccupancyModelParams> OccupancyModelParamsFromFlags();
 
 // Facts about a kernel that the occupancy model needs beyond its launch
 // dimensions. Values left at zero are unknown and replaced by defaults.
